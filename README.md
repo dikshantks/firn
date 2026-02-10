@@ -1,4 +1,4 @@
-# Calving
+# Firn
 
 A web application for visualizing Apache Iceberg table metadata, snapshots, manifests, and statistics.
 
