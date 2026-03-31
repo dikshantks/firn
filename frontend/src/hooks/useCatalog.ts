@@ -4,7 +4,7 @@
 
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { catalogApi } from '../services/api';
-import type { CatalogCreate, CatalogInfo } from '../types/iceberg';
+import type { CatalogCreate } from '../types/iceberg';
 
 // Query keys
 export const catalogKeys = {
@@ -46,7 +46,7 @@ export function useCatalogTest(name: string, enabled = false) {
 }
 
 /**
- * Hook to create a new catalog.
+ * Hook to create a new catalog (synchronous).
  */
 export function useCreateCatalog() {
   const queryClient = useQueryClient();
@@ -56,6 +56,15 @@ export function useCreateCatalog() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: catalogKeys.all });
     },
+  });
+}
+
+/**
+ * Hook to create a new catalog asynchronously (returns job ID for progress tracking).
+ */
+export function useCreateCatalogAsync() {
+  return useMutation({
+    mutationFn: (data: CatalogCreate) => catalogApi.createAsync(data),
   });
 }
 

@@ -42,30 +42,87 @@ class MetadataService:
             result.update(summary.additional_properties)
         return result
 
-    def list_tables(self) -> list[TableInfo]:
+    def list_tables(
+        self,
+        namespace: Optional[str] = None,
+        lazy: bool = False,
+        limit: Optional[int] = None,
+        offset: int = 0,
+    ) -> list[TableInfo]:
         """
-        List all tables in the catalog.
+        List tables in the catalog.
         
+        Args:
+            namespace: Filter by namespace (optional)
+            lazy: If True, skip loading full metadata (fast mode)
+            limit: Maximum number of tables to return
+            offset: Offset for pagination
+            
         Returns:
             List of TableInfo objects
         """
+        if lazy:
+            return self._list_tables_lazy(namespace, limit, offset)
+        return self._list_tables_full(namespace, limit, offset)
+    
+    def _list_tables_lazy(
+        self,
+        namespace: Optional[str] = None,
+        limit: Optional[int] = None,
+        offset: int = 0,
+    ) -> list[TableInfo]:
+        """
+        List tables without loading full metadata (fast).
+        Only uses Glue API, no S3 calls.
+        """
         tables = []
         
-        # #region agent log
-        try:
-            import json, time
-            from pathlib import Path
-            _p = getattr(self.catalog, "properties", {})
-            _log = Path(__file__).resolve().parent.parent.parent / "debug-a776e8.log"
-            with open(_log, "a") as _f:
-                _f.write(json.dumps({"sessionId":"a776e8","location":"metadata_service.py:list_tables_start","message":"catalog.properties at list_tables","data":{"catalog_name":self.catalog_name,"has_s3_region":"s3.region" in _p,"has_s3_access_key":"s3.access-key-id" in _p,"has_s3_secret":"s3.secret-access-key" in _p},"timestamp":int(time.time()*1000),"hypothesisId":"H2,H3"}) + "\n")
-        except Exception: pass
-        # #endregion
+        if namespace:
+            namespaces = [tuple(namespace.split("."))]
+        else:
+            namespaces = self.catalog.list_namespaces()
         
-        for namespace in self.catalog.list_namespaces():
-            namespace_str = ".".join(namespace)
+        for ns in namespaces:
+            namespace_str = ".".join(ns)
+            for table_id in self.catalog.list_tables(ns):
+                tables.append(TableInfo(
+                    catalog=self.catalog_name,
+                    namespace=namespace_str,
+                    name=table_id[-1],
+                    location=None,
+                    snapshot_count=None,
+                    current_snapshot_id=None,
+                    format_version=None,
+                ))
+        
+        # Apply pagination
+        if limit is not None:
+            tables = tables[offset:offset + limit]
+        elif offset > 0:
+            tables = tables[offset:]
+        
+        return tables
+    
+    def _list_tables_full(
+        self,
+        namespace: Optional[str] = None,
+        limit: Optional[int] = None,
+        offset: int = 0,
+    ) -> list[TableInfo]:
+        """
+        List tables with full metadata (slow, makes S3 calls).
+        """
+        tables = []
+        
+        if namespace:
+            namespaces = [tuple(namespace.split("."))]
+        else:
+            namespaces = self.catalog.list_namespaces()
+        
+        for ns in namespaces:
+            namespace_str = ".".join(ns)
             
-            for table_id in self.catalog.list_tables(namespace):
+            for table_id in self.catalog.list_tables(ns):
                 try:
                     table = self.catalog.load_table(table_id)
                     metadata = table.metadata
@@ -80,26 +137,9 @@ class MetadataService:
                         format_version=metadata.format_version,
                     ))
                 except Exception as e:
-                    # Log error with more context
                     error_msg = str(e)
-                    # #region agent log
-                    try:
-                        import json, time
-                        from pathlib import Path
-                        _p = getattr(self.catalog, "properties", {})
-                        _path = error_msg.split("path ")[-1].strip() if " path " in error_msg else error_msg[:200]
-                        _meta_loc = None
-                        if hasattr(self.catalog, "glue") and len(table_id) >= 2:
-                            try:
-                                _gt = self.catalog.glue.get_table(DatabaseName=table_id[0], Name=table_id[1])
-                                _meta_loc = _gt.get("Table", {}).get("Parameters", {}).get("metadata_location")
-                            except Exception: pass
-                        _log = Path(__file__).resolve().parent.parent.parent / "debug-a776e8.log"
-                        with open(_log, "a") as _f:
-                            _f.write(json.dumps({"sessionId":"a776e8","location":"metadata_service.py:load_table_except","message":"load_table failed","data":{"table_id":list(table_id),"error_msg":error_msg[:500],"extracted_path":_path,"metadata_location_from_glue":_meta_loc,"has_s3_region":"s3.region" in _p,"has_s3_access_key":"s3.access-key-id" in _p,"is_access_denied":"ACCESS_DENIED" in error_msg,"is_empty_path":"Empty path component" in error_msg},"timestamp":int(time.time()*1000),"hypothesisId":"H5,H6"}) + "\n")
-                    except Exception: pass
-                    # #endregion
                     if "ACCESS_DENIED" in error_msg or "403" in error_msg:
+                        print(error_msg)
                         print(f"⚠️  ACCESS DENIED for table {table_id}")
                         print(f"   Possible causes:")
                         print(f"   1. Missing S3 credentials: Add 's3.access-key-id' and 's3.secret-access-key'")
@@ -111,6 +151,12 @@ class MetadataService:
                     else:
                         print(f"Error loading table {table_id}: {e}")
                     continue
+        
+        # Apply pagination
+        if limit is not None:
+            tables = tables[offset:offset + limit]
+        elif offset > 0:
+            tables = tables[offset:]
         
         return tables
     

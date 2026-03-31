@@ -3,6 +3,7 @@
 from typing import Any, Optional
 
 from pyiceberg.catalog import Catalog, load_catalog
+from pyiceberg.catalog.glue import GlueCatalog
 from pyiceberg.exceptions import NoSuchTableError
 
 from app.models import CatalogType, CatalogInfo, CatalogTestResult
@@ -82,6 +83,19 @@ class CatalogService:
             if "client.session-token" in catalog_props and "s3.session-token" not in catalog_props:
                 catalog_props["s3.session-token"] = catalog_props["client.session-token"]
                 print("ℹ️  Auto-configured s3.session-token from client.session-token")
+            
+            # Always override s3.* with glue.* when glue.* is present
+            glue_to_s3_mapping = {
+                "glue.region": "s3.region",
+                "glue.access-key-id": "s3.access-key-id",
+                "glue.secret-access-key": "s3.secret-access-key",
+                "glue.session-token": "s3.session-token",
+            }
+            
+            for glue_key, s3_key in glue_to_s3_mapping.items():
+                if glue_key in catalog_props:
+                    catalog_props[s3_key] = catalog_props[glue_key]
+                    print(f"ℹ️  Auto-configured {s3_key} from {glue_key}")
         
         # Add S3 path-style access for MinIO compatibility
         if "s3.endpoint" in properties and "s3.path-style-access" not in properties:
@@ -99,20 +113,12 @@ class CatalogService:
         
         try:
             # Load the catalog using pyiceberg
-            catalog = load_catalog(name, **catalog_props)
+            # Use GlueCatalog directly for Glue to ensure S3 FileIO inherits credentials
+            if catalog_type == CatalogType.GLUE:
+                catalog = GlueCatalog(name, **catalog_props)
+            else:
+                catalog = load_catalog(name, **catalog_props)
             
-            # #region agent log
-            try:
-                import json, time
-                from pathlib import Path
-                _p = getattr(catalog, "properties", {})
-                _log = Path(__file__).resolve().parent.parent / "debug-a776e8.log"
-                with open(_log, "a") as _f:
-                    _f.write(json.dumps({"sessionId":"a776e8","location":"catalog_service.py:after_load_catalog","message":"catalog.properties after load","data":{"has_s3_region":"s3.region" in _p,"has_s3_access_key":"s3.access-key-id" in _p,"has_s3_secret":"s3.secret-access-key" in _p},"timestamp":int(time.time()*1000),"hypothesisId":"H2,H3"}) + "\n")
-            except Exception: pass
-            # #endregion
-            
-            # Store catalog and config
             self._catalogs[name] = catalog
             self._configs[name] = {
                 "name": name,
@@ -156,12 +162,13 @@ class CatalogService:
         """
         return self._catalogs.get(name)
     
-    def get_catalog_info(self, name: str) -> Optional[CatalogInfo]:
+    def get_catalog_info(self, name: str, include_stats: bool = False) -> Optional[CatalogInfo]:
         """
         Get info about a registered catalog.
         
         Args:
             name: Catalog name
+            include_stats: If True, count namespaces and tables (slow for large catalogs)
             
         Returns:
             CatalogInfo or None if not found
@@ -172,17 +179,23 @@ class CatalogService:
         config = self._configs[name]
         catalog = self._catalogs.get(name)
         
-        # Check if still connected
-        connected = False
+        # Check if still connected (quick check - just verify catalog exists)
+        connected = catalog is not None
         namespace_count = None
         table_count = None
         
-        if catalog:
+        # Only fetch stats if explicitly requested (this is slow for large catalogs)
+        if include_stats and catalog:
             try:
                 namespaces = list(catalog.list_namespaces())
                 connected = True
                 namespace_count = len(namespaces)
-                table_count = sum(len(list(catalog.list_tables(ns))) for ns in namespaces)
+                # Only count tables if there are few namespaces
+                if namespace_count <= 50:
+                    table_count = sum(len(list(catalog.list_tables(ns))) for ns in namespaces)
+                else:
+                    # For large catalogs, skip table count to avoid 6000+ API calls
+                    table_count = None
             except Exception:
                 connected = False
         
@@ -195,18 +208,22 @@ class CatalogService:
             table_count=table_count,
         )
     
-    def list_catalogs(self) -> list[CatalogInfo]:
+    def list_catalogs(self, include_stats: bool = False) -> list[CatalogInfo]:
         """
         List all registered catalogs.
+        
+        Args:
+            include_stats: If True, include namespace/table counts (slow for large catalogs)
         
         Returns:
             List of CatalogInfo objects
         """
-        return [
-            self.get_catalog_info(name)
-            for name in self._configs
-            if self.get_catalog_info(name) is not None
-        ]
+        results = []
+        for name in self._configs:
+            info = self.get_catalog_info(name, include_stats=include_stats)
+            if info is not None:
+                results.append(info)
+        return results
     
     def test_catalog(self, name: str) -> Optional[CatalogTestResult]:
         """
@@ -292,7 +309,11 @@ class CatalogService:
             if "s3.endpoint" in config["properties"]:
                 catalog_props["s3.path-style-access"] = "true"
             
-            catalog = load_catalog(name, **catalog_props)
+            # Use GlueCatalog directly for Glue to ensure S3 FileIO inherits credentials
+            if config["type"] == CatalogType.GLUE:
+                catalog = GlueCatalog(name, **catalog_props)
+            else:
+                catalog = load_catalog(name, **catalog_props)
             self._catalogs[name] = catalog
             return True
         except Exception:

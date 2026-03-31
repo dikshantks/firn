@@ -13,7 +13,7 @@ import {
   Activity,
 } from 'lucide-react';
 import { useCatalogs, useDeleteCatalog } from '../../hooks/useCatalog';
-import { useTables } from '../../hooks/useIcebergData';
+import { useNamespaces, useTables } from '../../hooks/useIcebergData';
 import type { CatalogInfo, TableInfo } from '../../types/iceberg';
 
 interface SidebarProps {
@@ -39,16 +39,8 @@ function CatalogTreeItem({
   selectedTable,
 }: CatalogTreeItemProps) {
   const [isExpanded, setIsExpanded] = useState(false);
-  const { data: tables, isLoading } = useTables(isExpanded ? catalog.name : '');
-
-  // Group tables by namespace
-  const tablesByNamespace = tables?.reduce((acc, table) => {
-    if (!acc[table.namespace]) {
-      acc[table.namespace] = [];
-    }
-    acc[table.namespace].push(table);
-    return acc;
-  }, {} as Record<string, TableInfo[]>) ?? {};
+  // Only fetch namespaces when expanded (fast, no S3 calls)
+  const { data: namespaces, isLoading } = useNamespaces(isExpanded ? catalog.name : '');
 
   return (
     <div className="select-none">
@@ -117,17 +109,16 @@ function CatalogTreeItem({
           {isLoading ? (
             <div className="flex items-center gap-2 px-2 py-1.5 text-gray-500">
               <Loader2 className="w-4 h-4 animate-spin" />
-              <span className="text-sm">Loading...</span>
+              <span className="text-sm">Loading namespaces...</span>
             </div>
-          ) : Object.keys(tablesByNamespace).length === 0 ? (
-            <div className="px-2 py-1.5 text-sm text-gray-500">No tables found</div>
+          ) : !namespaces || namespaces.length === 0 ? (
+            <div className="px-2 py-1.5 text-sm text-gray-500">No namespaces found</div>
           ) : (
-            Object.entries(tablesByNamespace).map(([namespace, nsTables]) => (
+            namespaces.map((namespace) => (
               <NamespaceTreeItem
                 key={namespace}
                 catalogName={catalog.name}
                 namespace={namespace}
-                tables={nsTables}
                 onTableSelect={onTableSelect}
                 selectedTable={selectedTable}
               />
@@ -142,7 +133,6 @@ function CatalogTreeItem({
 interface NamespaceTreeItemProps {
   catalogName: string;
   namespace: string;
-  tables: TableInfo[];
   onTableSelect: (catalog: string, namespace: string, table: string) => void;
   selectedTable?: { catalog: string; namespace: string; table: string };
 }
@@ -150,11 +140,15 @@ interface NamespaceTreeItemProps {
 function NamespaceTreeItem({
   catalogName,
   namespace,
-  tables,
   onTableSelect,
   selectedTable,
 }: NamespaceTreeItemProps) {
-  const [isExpanded, setIsExpanded] = useState(true);
+  const [isExpanded, setIsExpanded] = useState(false);
+  // Only fetch tables when namespace is expanded (lazy mode, no S3 calls)
+  const { data: tables, isLoading } = useTables(
+    isExpanded ? catalogName : '',
+    { namespace, lazy: true }
+  );
 
   return (
     <div>
@@ -169,35 +163,46 @@ function NamespaceTreeItem({
         )}
         <FolderOpen className="w-4 h-4 text-yellow-500" />
         <span className="text-sm text-gray-600 dark:text-gray-300">{namespace}</span>
-        <span className="text-xs text-gray-400">({tables.length})</span>
+        {tables && <span className="text-xs text-gray-400">({tables.length})</span>}
       </div>
 
       {isExpanded && (
         <div className="ml-4">
-          {tables.map((table) => {
-            const isSelected =
-              selectedTable?.catalog === catalogName &&
-              selectedTable?.namespace === namespace &&
-              selectedTable?.table === table.name;
+          {isLoading ? (
+            <div className="flex items-center gap-2 px-2 py-1.5 text-gray-500">
+              <Loader2 className="w-4 h-4 animate-spin" />
+              <span className="text-sm">Loading tables...</span>
+            </div>
+          ) : !tables || tables.length === 0 ? (
+            <div className="px-2 py-1.5 text-sm text-gray-500">No tables found</div>
+          ) : (
+            tables.map((table) => {
+              const isSelected =
+                selectedTable?.catalog === catalogName &&
+                selectedTable?.namespace === namespace &&
+                selectedTable?.table === table.name;
 
-            return (
-              <div
-                key={table.name}
-                className={`flex items-center gap-2 px-2 py-1.5 rounded cursor-pointer ${
-                  isSelected
-                    ? 'bg-iceberg/10 text-iceberg'
-                    : 'hover:bg-gray-100 dark:hover:bg-gray-700'
-                }`}
-                onClick={() => onTableSelect(catalogName, namespace, table.name)}
-              >
-                <Table className="w-4 h-4" />
-                <span className="text-sm truncate">{table.name}</span>
-                <span className="text-xs text-gray-400 ml-auto">
-                  {table.snapshot_count} snaps
-                </span>
-              </div>
-            );
-          })}
+              return (
+                <div
+                  key={table.name}
+                  className={`flex items-center gap-2 px-2 py-1.5 rounded cursor-pointer ${
+                    isSelected
+                      ? 'bg-iceberg/10 text-iceberg'
+                      : 'hover:bg-gray-100 dark:hover:bg-gray-700'
+                  }`}
+                  onClick={() => onTableSelect(catalogName, namespace, table.name)}
+                >
+                  <Table className="w-4 h-4" />
+                  <span className="text-sm truncate">{table.name}</span>
+                  {table.snapshot_count !== null && table.snapshot_count !== undefined && (
+                    <span className="text-xs text-gray-400 ml-auto">
+                      {table.snapshot_count} snaps
+                    </span>
+                  )}
+                </div>
+              );
+            })
+          )}
         </div>
       )}
     </div>

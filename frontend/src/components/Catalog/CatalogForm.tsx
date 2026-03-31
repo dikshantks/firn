@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { X, Database, Cloud, Server } from 'lucide-react';
-import { useCreateCatalog } from '../../hooks/useCatalog';
+import { useCreateCatalogAsync } from '../../hooks/useCatalog';
+import { JobProgress } from '../Common/JobProgress';
 import type { CatalogType } from '../../types/iceberg';
 
 interface CatalogFormProps {
@@ -23,11 +24,14 @@ export function CatalogForm({ onClose }: CatalogFormProps) {
     'glue.region': '',
     'glue.profile-name': '',
   });
+  const [jobId, setJobId] = useState<string | null>(null);
+  const [asyncError, setAsyncError] = useState<string | null>(null);
 
-  const createCatalog = useCreateCatalog();
+  const createCatalogAsync = useCreateCatalogAsync();
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    setAsyncError(null);
 
     // Filter out empty properties
     const filteredProps = Object.fromEntries(
@@ -35,15 +39,25 @@ export function CatalogForm({ onClose }: CatalogFormProps) {
     );
 
     try {
-      await createCatalog.mutateAsync({
+      const result = await createCatalogAsync.mutateAsync({
         name,
         type,
         properties: filteredProps,
       });
-      onClose();
+      setJobId(result.job_id);
     } catch (error) {
-      console.error('Failed to create catalog:', error);
+      console.error('Failed to start catalog registration:', error);
+      setAsyncError((error as Error)?.message || 'Failed to start registration');
     }
+  };
+
+  const handleJobComplete = () => {
+    setTimeout(() => onClose(), 1500);
+  };
+
+  const handleJobError = (error: string) => {
+    setAsyncError(error);
+    setJobId(null);
   };
 
   const handlePropertyChange = (key: string, value: string) => {
@@ -263,10 +277,19 @@ export function CatalogForm({ onClose }: CatalogFormProps) {
             </>
           )}
 
+          {/* Job Progress */}
+          {jobId && (
+            <JobProgress
+              jobId={jobId}
+              onComplete={handleJobComplete}
+              onError={handleJobError}
+            />
+          )}
+
           {/* Error message */}
-          {createCatalog.isError && (
+          {(createCatalogAsync.isError || asyncError) && !jobId && (
             <div className="p-3 bg-red-50 dark:bg-red-900/30 border border-red-200 dark:border-red-800 rounded-lg text-red-700 dark:text-red-300 text-sm">
-              {(createCatalog.error as Error)?.message || 'Failed to create catalog'}
+              {asyncError || (createCatalogAsync.error as Error)?.message || 'Failed to create catalog'}
             </div>
           )}
 
@@ -275,19 +298,20 @@ export function CatalogForm({ onClose }: CatalogFormProps) {
             <button
               type="button"
               onClick={onClose}
-              className="px-4 py-2 text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-lg transition-colors"
+              disabled={!!jobId}
+              className="px-4 py-2 text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-lg transition-colors disabled:opacity-50"
             >
               Cancel
             </button>
             <button
               type="submit"
-              disabled={createCatalog.isPending || !name}
+              disabled={createCatalogAsync.isPending || !name || !!jobId}
               className="px-4 py-2 bg-iceberg text-white rounded-lg hover:bg-iceberg-dark transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
             >
-              {createCatalog.isPending ? (
+              {createCatalogAsync.isPending || jobId ? (
                 <>
                   <span className="animate-spin">⏳</span>
-                  Connecting...
+                  {jobId ? 'Registering...' : 'Starting...'}
                 </>
               ) : (
                 <>

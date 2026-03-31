@@ -59,13 +59,61 @@ export const catalogApi = {
   delete: async (name: string): Promise<void> => {
     await apiClient.delete(`/api/catalogs/${name}`);
   },
+
+  createAsync: async (data: CatalogCreate): Promise<{ job_id: string; message: string }> => {
+    const response = await apiClient.post<{ job_id: string; message: string }>('/api/catalogs/async', data);
+    return response.data;
+  },
+};
+
+// Job API
+export interface JobStatus {
+  id: string;
+  status: 'pending' | 'running' | 'completed' | 'failed';
+  progress: number;
+  message: string;
+  result?: unknown;
+  error?: string | null;
+}
+
+export const jobApi = {
+  get: async (jobId: string): Promise<JobStatus> => {
+    const response = await apiClient.get<JobStatus>(`/api/jobs/${jobId}`);
+    return response.data;
+  },
+
+  list: async (limit = 100): Promise<JobStatus[]> => {
+    const response = await apiClient.get<JobStatus[]>('/api/jobs', { params: { limit } });
+    return response.data;
+  },
+
+  streamUrl: (jobId: string): string => `${API_BASE_URL}/api/jobs/${jobId}/stream`,
+
+  delete: async (jobId: string): Promise<void> => {
+    await apiClient.delete(`/api/jobs/${jobId}`);
+  },
 };
 
 // Table API
 export const tableApi = {
-  list: async (catalog: string): Promise<TableInfo[]> => {
-    const response = await apiClient.get<TableInfo[]>('/api/tables', {
+  listNamespaces: async (catalog: string): Promise<string[]> => {
+    const response = await apiClient.get<string[]>('/api/tables/namespaces', {
       params: { catalog },
+    });
+    return response.data;
+  },
+
+  list: async (
+    catalog: string,
+    options?: {
+      namespace?: string;
+      lazy?: boolean;
+      limit?: number;
+      offset?: number;
+    }
+  ): Promise<TableInfo[]> => {
+    const response = await apiClient.get<TableInfo[]>('/api/tables', {
+      params: { catalog, ...options },
     });
     return response.data;
   },
@@ -259,6 +307,8 @@ export const statisticsApi = {
 };
 
 // Health API
+export type ScanMode = 'cached' | 'light' | 'full';
+
 export interface TableHealthSummary {
   total_tables: number;
   healthy_tables: number;
@@ -269,6 +319,9 @@ export interface TableHealthSummary {
   tables_needing_manifest_rewrite: number;
   tables_with_delete_files: number;
   total_wasted_storage_gb: number;
+  scan_mode?: string;
+  cached_at?: string;
+  cache_age_minutes?: number;
 }
 
 export interface HealthThresholds {
@@ -285,18 +338,122 @@ export interface HealthThresholds {
   small_manifest_warning_threshold?: number;
 }
 
+export interface CacheInfo {
+  catalog: string;
+  cached_tables: number;
+  cache_age_minutes: number | null;
+  has_cache: boolean;
+}
+
+export interface CachedTableHealth {
+  catalog: string;
+  namespace: string;
+  table_name: string;
+  status: string;
+  health_score: number;
+  total_snapshots: number;
+  total_data_files: number;
+  total_delete_files: number;
+  small_files_count: number;
+  total_size_gb: number;
+  avg_file_size_mb: number;
+  oldest_snapshot_age_days: number | null;
+  days_since_last_write: number | null;
+  issues_count: number;
+  warnings_count: number;
+  scan_mode: string;
+  scanned_at: string;
+}
+
+export interface ScanTriggerResponse {
+  job_id: string;
+  mode: string;
+  message: string;
+}
+
 export const healthApi = {
   getSummary: async (
     catalog: string,
-    thresholds?: HealthThresholds
+    options?: {
+      mode?: ScanMode;
+      max_cache_age_minutes?: number;
+      thresholds?: HealthThresholds;
+    }
   ): Promise<TableHealthSummary> => {
     const response = await apiClient.get<TableHealthSummary>('/api/health/summary', {
       params: {
         catalog,
+        mode: options?.mode,
+        max_cache_age_minutes: options?.max_cache_age_minutes,
+        ...options?.thresholds,
+      },
+    });
+    return response.data;
+  },
+
+  getCacheInfo: async (catalog: string): Promise<CacheInfo> => {
+    const response = await apiClient.get<CacheInfo>('/api/health/cache/info', {
+      params: { catalog },
+    });
+    return response.data;
+  },
+
+  clearCache: async (catalog: string): Promise<{ deleted_tables: number }> => {
+    const response = await apiClient.delete<{ deleted_tables: number }>('/api/health/cache', {
+      params: { catalog },
+    });
+    return response.data;
+  },
+
+  getCachedTables: async (
+    catalog: string,
+    options?: {
+      status_filter?: 'healthy' | 'warning' | 'critical';
+      min_snapshots?: number;
+      min_delete_files?: number;
+      min_small_files?: number;
+      limit?: number;
+      offset?: number;
+    }
+  ): Promise<CachedTableHealth[]> => {
+    const response = await apiClient.get<CachedTableHealth[]>('/api/health/tables/cached', {
+      params: { catalog, ...options },
+    });
+    return response.data;
+  },
+
+  triggerScan: async (
+    catalog: string,
+    mode: 'light' | 'full' = 'light',
+    thresholds?: HealthThresholds
+  ): Promise<ScanTriggerResponse> => {
+    const response = await apiClient.post<ScanTriggerResponse>('/api/health/scan/trigger', null, {
+      params: {
+        catalog,
+        mode,
         ...thresholds,
       },
     });
     return response.data;
+  },
+
+  streamUrl: (
+    catalog: string,
+    mode: 'light' | 'full' = 'light',
+    thresholds?: HealthThresholds
+  ): string => {
+    const params = new URLSearchParams({
+      catalog,
+      mode,
+    });
+    if (thresholds) {
+      Object.entries(thresholds).forEach(([key, value]) => {
+        if (value !== undefined) {
+          params.append(key, String(value));
+        }
+      });
+    }
+    return `${API_BASE_URL}/api/health/summary/stream?${params.toString()}`;
   },
 };
 

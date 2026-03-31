@@ -69,10 +69,10 @@ class TableInfo(BaseModel):
     catalog: str = Field(..., description="Catalog name")
     namespace: str = Field(..., description="Namespace/database name")
     name: str = Field(..., description="Table name")
-    location: str = Field(..., description="Table location in storage")
-    snapshot_count: int = Field(0, description="Number of snapshots")
+    location: Optional[str] = Field(None, description="Table location in storage")
+    snapshot_count: Optional[int] = Field(None, description="Number of snapshots")
     current_snapshot_id: Optional[int] = Field(None, description="Current snapshot ID")
-    format_version: int = Field(1, description="Iceberg format version")
+    format_version: Optional[int] = Field(None, description="Iceberg format version")
 
     @field_serializer('current_snapshot_id')
     def serialize_current_snapshot_id(self, value: Optional[int]) -> Optional[str]:

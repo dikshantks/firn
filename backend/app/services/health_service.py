@@ -1,7 +1,7 @@
 """Service for analyzing table health and generating maintenance recommendations."""
 
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Generator, Literal, Optional
 
 from pyiceberg.catalog import Catalog
 from pyiceberg.table import Table
@@ -15,6 +15,8 @@ from app.models.health import (
     TableHealthMetrics,
     TableHealthSummary,
 )
+
+ScanMode = Literal["light", "full"]
 
 
 class HealthService:
@@ -50,6 +52,7 @@ class HealthService:
         table_name: str,
         catalog_name: str,
         thresholds: Optional[HealthThresholds] = None,
+        mode: ScanMode = "full",
     ) -> TableHealth:
         """Analyze health of a specific table.
         
@@ -58,6 +61,7 @@ class HealthService:
             table_name: Table name
             catalog_name: Catalog name for identification
             thresholds: Optional custom thresholds (uses defaults if not provided)
+            mode: "light" (metadata only, fast) or "full" (with S3 manifest reads)
             
         Returns:
             TableHealth with metrics and recommendations
@@ -68,8 +72,11 @@ class HealthService:
         if thresholds is None:
             thresholds = HealthThresholds()
         
-        # Collect metrics
-        metrics = self._collect_metrics(table, thresholds)
+        # Collect metrics based on mode
+        if mode == "light":
+            metrics = self._collect_metrics_light(table)
+        else:
+            metrics = self._collect_metrics_full(table, thresholds)
         
         # Generate recommendations
         recommendations = self._generate_recommendations(metrics, table, thresholds)
@@ -98,6 +105,8 @@ class HealthService:
         catalog_name: str,
         min_snapshots: Optional[int] = None,
         thresholds: Optional[HealthThresholds] = None,
+        mode: ScanMode = "full",
+        job_id: Optional[str] = None,
     ) -> list[TableHealth]:
         """Scan all tables in catalog for health issues.
         
@@ -105,16 +114,39 @@ class HealthService:
             catalog_name: Catalog name
             min_snapshots: Only include tables with >= this many snapshots
             thresholds: Optional custom thresholds (uses defaults if not provided)
+            mode: "light" (metadata only, fast) or "full" (with S3 manifest reads)
+            job_id: Optional job ID for progress updates
             
         Returns:
             List of table health assessments
         """
-        results = []
+        from app.services.job_service import job_service
         
-        for namespace in self.catalog.list_namespaces():
+        results = []
+        namespaces = list(self.catalog.list_namespaces())
+        total_namespaces = len(namespaces)
+        
+        # Count total tables for progress calculation
+        total_tables = 0
+        tables_by_namespace: dict[tuple, list] = {}
+        for ns in namespaces:
+            tables = list(self.catalog.list_tables(ns))
+            tables_by_namespace[ns] = tables
+            total_tables += len(tables)
+        
+        if job_id:
+            job_service.update_job(
+                job_id,
+                progress=10,
+                message=f"Found {total_namespaces} namespaces, {total_tables} tables. Starting {mode} scan..."
+            )
+        
+        processed = 0
+        for ns_idx, namespace in enumerate(namespaces):
             namespace_str = ".".join(namespace)
+            tables = tables_by_namespace[namespace]
             
-            for table_identifier in self.catalog.list_tables(namespace):
+            for table_identifier in tables:
                 try:
                     table_name = table_identifier[-1]
                     health = self.analyze_table_health(
@@ -122,34 +154,197 @@ class HealthService:
                         table_name,
                         catalog_name,
                         thresholds=thresholds,
+                        mode=mode,
                     )
                     
                     # Apply filter
                     if min_snapshots is None or health.metrics.total_snapshots >= min_snapshots:
                         results.append(health)
+                    
+                    processed += 1
+                    
+                    # Update progress every 100 tables or at end of namespace
+                    if job_id and (processed % 100 == 0 or processed == total_tables):
+                        progress = 10 + int((processed / total_tables) * 85)
+                        job_service.update_job(
+                            job_id,
+                            progress=progress,
+                            message=f"Scanned {processed}/{total_tables} tables ({namespace_str})..."
+                        )
                         
                 except Exception as e:
                     print(f"Error analyzing {table_identifier}: {e}")
+                    processed += 1
                     continue
         
+        if job_id:
+            job_service.update_job(
+                job_id,
+                progress=95,
+                message=f"Scan complete. Processing {len(results)} results..."
+            )
+        
         return results
+    
+    def scan_all_tables_streaming(
+        self,
+        catalog_name: str,
+        thresholds: Optional[HealthThresholds] = None,
+        mode: ScanMode = "light",
+    ) -> Generator[dict, None, None]:
+        """
+        Stream health scan results namespace-by-namespace.
+        
+        This generator yields results incrementally as each namespace is scanned,
+        allowing the frontend to display partial results immediately.
+        
+        Args:
+            catalog_name: Catalog name
+            thresholds: Optional custom thresholds
+            mode: "light" (metadata only, fast) or "full" (with S3 manifest reads)
+            
+        Yields:
+            - {"type": "progress", "namespaces_total": N, "tables_total": N}
+            - {"type": "namespace_complete", "namespace": "...", "tables_scanned": N, 
+               "healthy": N, "warning": N, "critical": N, "namespace_health": [...]}
+            - {"type": "scan_complete", "summary": {...}}
+        """
+        from app.services.health_cache import health_cache
+        
+        namespaces = list(self.catalog.list_namespaces())
+        total_namespaces = len(namespaces)
+        
+        # Count total tables for progress calculation
+        total_tables = 0
+        tables_by_namespace: dict[tuple, list] = {}
+        for ns in namespaces:
+            tables = list(self.catalog.list_tables(ns))
+            tables_by_namespace[ns] = tables
+            total_tables += len(tables)
+        
+        # Yield initial progress info
+        yield {
+            "type": "progress",
+            "namespaces_total": total_namespaces,
+            "tables_total": total_tables,
+            "mode": mode,
+        }
+        
+        # Clear old cache for this catalog before starting
+        health_cache.clear_catalog_cache(catalog_name)
+        
+        all_health: list[TableHealth] = []
+        processed_tables = 0
+        
+        for ns_idx, namespace in enumerate(namespaces):
+            namespace_str = ".".join(namespace)
+            tables = tables_by_namespace[namespace]
+            namespace_health: list[TableHealth] = []
+            
+            for table_identifier in tables:
+                try:
+                    table_name = table_identifier[-1]
+                    health = self.analyze_table_health(
+                        namespace_str,
+                        table_name,
+                        catalog_name,
+                        thresholds=thresholds,
+                        mode=mode,
+                    )
+                    namespace_health.append(health)
+                    all_health.append(health)
+                    
+                    # Cache individual table health as we go
+                    health_cache.save_table_health(health, scan_mode=mode)
+                    
+                except Exception as e:
+                    print(f"Error analyzing {table_identifier}: {e}")
+                    continue
+                finally:
+                    processed_tables += 1
+            
+            # Compute namespace-level summary
+            ns_healthy = sum(1 for h in namespace_health if h.status == HealthStatus.HEALTHY)
+            ns_warning = sum(1 for h in namespace_health if h.status == HealthStatus.WARNING)
+            ns_critical = sum(1 for h in namespace_health if h.status == HealthStatus.CRITICAL)
+            
+            # Yield namespace completion event
+            yield {
+                "type": "namespace_complete",
+                "namespace": namespace_str,
+                "namespace_index": ns_idx + 1,
+                "namespaces_total": total_namespaces,
+                "tables_scanned": len(namespace_health),
+                "tables_total_scanned": processed_tables,
+                "tables_total": total_tables,
+                "healthy": ns_healthy,
+                "warning": ns_warning,
+                "critical": ns_critical,
+                "progress_percent": int((processed_tables / total_tables) * 100) if total_tables > 0 else 100,
+            }
+        
+        # Compute and cache final summary
+        summary = self._compute_summary(all_health, mode=mode)
+        health_cache.save_catalog_summary(catalog_name, summary, scan_mode=mode)
+        
+        # Yield final summary
+        yield {
+            "type": "scan_complete",
+            "summary": {
+                "total_tables": summary.total_tables,
+                "healthy_tables": summary.healthy_tables,
+                "warning_tables": summary.warning_tables,
+                "critical_tables": summary.critical_tables,
+                "tables_needing_snapshot_expiration": summary.tables_needing_snapshot_expiration,
+                "tables_needing_compaction": summary.tables_needing_compaction,
+                "tables_needing_manifest_rewrite": summary.tables_needing_manifest_rewrite,
+                "tables_with_delete_files": summary.tables_with_delete_files,
+                "total_wasted_storage_gb": summary.total_wasted_storage_gb,
+                "scan_mode": summary.scan_mode,
+            },
+        }
     
     def get_health_summary(
         self,
         catalog_name: str,
         thresholds: Optional[HealthThresholds] = None,
+        mode: ScanMode = "full",
+        job_id: Optional[str] = None,
     ) -> TableHealthSummary:
         """Get summary of health across all tables.
         
         Args:
             catalog_name: Catalog name
             thresholds: Optional custom thresholds (uses defaults if not provided)
+            mode: "light" (metadata only, fast) or "full" (with S3 manifest reads)
+            job_id: Optional job ID for progress updates
             
         Returns:
             Summary statistics
         """
-        all_health = self.scan_all_tables(catalog_name, thresholds=thresholds)
+        all_health = self.scan_all_tables(
+            catalog_name,
+            thresholds=thresholds,
+            mode=mode,
+            job_id=job_id,
+        )
         
+        return self._compute_summary(all_health, mode=mode)
+    
+    def _compute_summary(
+        self,
+        all_health: list[TableHealth],
+        mode: ScanMode = "full",
+    ) -> TableHealthSummary:
+        """Compute summary statistics from health results.
+        
+        Args:
+            all_health: List of table health assessments
+            mode: Scan mode used
+            
+        Returns:
+            Summary statistics
+        """
         healthy = sum(1 for h in all_health if h.status == HealthStatus.HEALTHY)
         warning = sum(1 for h in all_health if h.status == HealthStatus.WARNING)
         critical = sum(1 for h in all_health if h.status == HealthStatus.CRITICAL)
@@ -190,16 +385,168 @@ class HealthService:
             tables_needing_manifest_rewrite=needs_manifest_rewrite,
             tables_with_delete_files=with_delete_files,
             total_wasted_storage_gb=wasted_storage,
+            scan_mode=mode,
         )
     
-    def _collect_metrics(self, table: Table, thresholds: Optional[HealthThresholds] = None) -> TableHealthMetrics:
-        """Collect health metrics from table.
+    def run_background_scan(
+        self,
+        catalog_name: str,
+        mode: ScanMode = "light",
+        thresholds: Optional[HealthThresholds] = None,
+        job_id: Optional[str] = None,
+    ) -> TableHealthSummary:
+        """
+        Run a health scan and cache results.
+        
+        This method is designed to be called from a background job.
+        It scans all tables, caches individual results, and stores
+        the catalog summary for instant retrieval.
+        
+        Args:
+            catalog_name: Catalog name
+            mode: "light" (metadata only) or "full" (with S3 manifest reads)
+            thresholds: Optional custom thresholds
+            job_id: Job ID for progress updates
+            
+        Returns:
+            TableHealthSummary
+        """
+        from app.services.health_cache import health_cache
+        from app.services.job_service import job_service
+        
+        if job_id:
+            job_service.update_job(
+                job_id,
+                progress=5,
+                message=f"Starting {mode} health scan for catalog '{catalog_name}'..."
+            )
+        
+        # Clear old cache for this catalog
+        health_cache.clear_catalog_cache(catalog_name)
+        
+        # Run the scan
+        all_health = self.scan_all_tables(
+            catalog_name,
+            thresholds=thresholds,
+            mode=mode,
+            job_id=job_id,
+        )
+        
+        if job_id:
+            job_service.update_job(
+                job_id,
+                progress=96,
+                message=f"Caching {len(all_health)} table health results..."
+            )
+        
+        # Cache individual table health
+        for health in all_health:
+            health_cache.save_table_health(health, scan_mode=mode)
+        
+        # Compute and cache summary
+        summary = self._compute_summary(all_health, mode=mode)
+        health_cache.save_catalog_summary(catalog_name, summary, scan_mode=mode)
+        
+        if job_id:
+            job_service.update_job(
+                job_id,
+                progress=100,
+                message=f"Scan complete. {len(all_health)} tables cached."
+            )
+        
+        return summary
+    
+    def _collect_metrics_light(self, table: Table) -> TableHealthMetrics:
+        """
+        Collect health metrics from metadata only - NO S3 manifest reads.
+        
+        This is much faster than full metrics collection as it only uses
+        data already present in the table metadata (metadata.json).
         
         Args:
             table: PyIceberg table
             
         Returns:
-            Health metrics
+            Health metrics (file-level metrics will be estimates from snapshot summary)
+        """
+        metadata = table.metadata
+        snapshots = list(metadata.snapshots)
+        
+        # Snapshot metrics (from metadata - no S3 calls)
+        total_snapshots = len(snapshots)
+        
+        oldest_snapshot_age_days = None
+        if snapshots:
+            oldest_timestamp = min(s.timestamp_ms for s in snapshots)
+            oldest_snapshot_age_days = (
+                datetime.now() - datetime.fromtimestamp(oldest_timestamp / 1000)
+            ).days
+        
+        now = datetime.now()
+        snapshots_last_7_days = sum(
+            1 for s in snapshots
+            if (now - datetime.fromtimestamp(s.timestamp_ms / 1000)).days <= 7
+        )
+        snapshots_last_30_days = sum(
+            1 for s in snapshots
+            if (now - datetime.fromtimestamp(s.timestamp_ms / 1000)).days <= 30
+        )
+        
+        # File metrics from snapshot summary (already in metadata.json)
+        total_data_files = 0
+        total_delete_files = 0
+        total_size_bytes = 0
+        
+        current_snapshot = table.current_snapshot()
+        if current_snapshot and current_snapshot.summary:
+            summary = current_snapshot.summary
+            total_data_files = int(summary.get("total-data-files", 0))
+            total_delete_files = int(summary.get("total-delete-files", 0))
+            total_size_bytes = int(summary.get("total-files-size", 0))
+        
+        avg_file_size_mb = (
+            (total_size_bytes / total_data_files / 1024 / 1024)
+            if total_data_files > 0
+            else 0
+        )
+        total_size_gb = total_size_bytes / 1024 / 1024 / 1024
+        
+        # Days since last write
+        days_since_last_write = None
+        if snapshots:
+            latest_timestamp = max(s.timestamp_ms for s in snapshots)
+            days_since_last_write = (
+                now - datetime.fromtimestamp(latest_timestamp / 1000)
+            ).days
+        
+        return TableHealthMetrics(
+            total_snapshots=total_snapshots,
+            oldest_snapshot_age_days=oldest_snapshot_age_days,
+            snapshots_last_7_days=snapshots_last_7_days,
+            snapshots_last_30_days=snapshots_last_30_days,
+            total_data_files=total_data_files,
+            total_delete_files=total_delete_files,
+            small_files_count=0,  # Not available without manifest scan
+            avg_file_size_mb=avg_file_size_mb,
+            total_size_gb=total_size_gb,
+            total_manifests=0,  # Not available without manifest scan
+            small_manifests_count=0,  # Not available without manifest scan
+            days_since_last_write=days_since_last_write,
+        )
+    
+    def _collect_metrics_full(self, table: Table, thresholds: Optional[HealthThresholds] = None) -> TableHealthMetrics:
+        """
+        Collect full health metrics including file-level analysis.
+        
+        This reads manifest files from S3 to get accurate file counts and sizes.
+        Much slower than light mode but provides small file counts.
+        
+        Args:
+            table: PyIceberg table
+            thresholds: Thresholds for small file detection
+            
+        Returns:
+            Health metrics with full file-level details
         """
         metadata = table.metadata
         snapshots = list(metadata.snapshots)
@@ -224,7 +571,7 @@ class HealthService:
             if (now - datetime.fromtimestamp(s.timestamp_ms / 1000)).days <= 30
         )
         
-        # File metrics - scan current snapshot
+        # File metrics - scan current snapshot (reads manifests from S3)
         total_data_files = 0
         total_delete_files = 0
         small_files_count = 0
@@ -246,14 +593,10 @@ class HealthService:
         except Exception as e:
             print(f"Error scanning files: {e}")
         
-        # Count delete files from current snapshot
-        if table.current_snapshot():
-            try:
-                # This is a simplified check - actual implementation would need
-                # to parse manifest files to count delete files
-                total_delete_files = 0  # Placeholder
-            except Exception:
-                pass
+        # Get delete file count from snapshot summary as fallback
+        current_snapshot = table.current_snapshot()
+        if current_snapshot and current_snapshot.summary:
+            total_delete_files = int(current_snapshot.summary.get("total-delete-files", 0))
         
         avg_file_size_mb = (
             (total_size_bytes / total_data_files / 1024 / 1024)
@@ -265,7 +608,6 @@ class HealthService:
         # Manifest metrics - simplified
         total_manifests = 0
         small_manifests_count = 0
-        # Would need to parse manifest list to get accurate counts
         
         # Days since last write
         days_since_last_write = None
@@ -289,6 +631,10 @@ class HealthService:
             small_manifests_count=small_manifests_count,
             days_since_last_write=days_since_last_write,
         )
+    
+    def _collect_metrics(self, table: Table, thresholds: Optional[HealthThresholds] = None) -> TableHealthMetrics:
+        """Collect health metrics from table (full mode for backward compatibility)."""
+        return self._collect_metrics_full(table, thresholds)
     
     def _generate_recommendations(
         self,

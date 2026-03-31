@@ -122,3 +122,8 @@ class TableHealthSummary(BaseModel):
     tables_with_delete_files: int
     total_wasted_storage_gb: float
     last_scan: datetime = Field(default_factory=datetime.utcnow)
+    
+    # Cache metadata
+    scan_mode: str = Field("full", description="Scan mode used: light or full")
+    cached_at: Optional[datetime] = Field(None, description="When this data was cached")
+    cache_age_minutes: Optional[int] = Field(None, description="Age of cached data in minutes")

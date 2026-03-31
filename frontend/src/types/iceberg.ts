@@ -40,10 +40,10 @@ export interface TableInfo {
   catalog: string;
   namespace: string;
   name: string;
-  location: string;
-  snapshot_count: number;
-  current_snapshot_id?: string;
-  format_version: number;
+  location?: string | null;
+  snapshot_count?: number | null;
+  current_snapshot_id?: string | null;
+  format_version?: number | null;
 }
 
 export interface FieldInfo {

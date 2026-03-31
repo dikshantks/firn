@@ -18,6 +18,7 @@ from app.routers import (
     analytics,
     health,
     spark_optimization,
+    jobs,
 )
 from app.services import catalog_service
 
@@ -85,6 +86,7 @@ app.include_router(puffin.router, prefix="/api/tables", tags=["Statistics"])
 app.include_router(analytics.router, prefix="/api/tables", tags=["Analytics"])
 app.include_router(health.router, prefix="/api/health", tags=["Health"])
 app.include_router(spark_optimization.router, prefix="/api/optimization", tags=["optimization"])
+app.include_router(jobs.router, prefix="/api/jobs", tags=["Jobs"])
 
 
 @app.get("/")

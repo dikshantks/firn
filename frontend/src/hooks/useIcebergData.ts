@@ -13,8 +13,14 @@ import {
 } from '../services/api';
 
 // Query keys
+export const namespaceKeys = {
+  all: (catalog: string) => ['namespaces', catalog] as const,
+};
+
 export const tableKeys = {
   all: (catalog: string) => ['tables', catalog] as const,
+  byNamespace: (catalog: string, namespace: string, lazy?: boolean) =>
+    ['tables', catalog, namespace, lazy] as const,
   detail: (catalog: string, namespace: string, table: string) =>
     ['tables', catalog, namespace, table] as const,
   metadata: (catalog: string, namespace: string, table: string) =>
@@ -60,11 +66,29 @@ export const analyticsKeys = {
     ['analytics', catalog, namespace, table, 'history'] as const,
 };
 
-// Table hooks
-export function useTables(catalog: string) {
+// Namespace hooks
+export function useNamespaces(catalog: string) {
   return useQuery({
-    queryKey: tableKeys.all(catalog),
-    queryFn: () => tableApi.list(catalog),
+    queryKey: namespaceKeys.all(catalog),
+    queryFn: () => tableApi.listNamespaces(catalog),
+    enabled: !!catalog,
+  });
+}
+
+// Table hooks
+export function useTables(
+  catalog: string,
+  options?: {
+    namespace?: string;
+    lazy?: boolean;
+    limit?: number;
+  }
+) {
+  return useQuery({
+    queryKey: options?.namespace
+      ? tableKeys.byNamespace(catalog, options.namespace, options.lazy)
+      : tableKeys.all(catalog),
+    queryFn: () => tableApi.list(catalog, options),
     enabled: !!catalog,
   });
 }
