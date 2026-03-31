@@ -101,15 +101,6 @@ class CatalogService:
         if "s3.endpoint" in properties and "s3.path-style-access" not in properties:
             catalog_props["s3.path-style-access"] = "true"
         
-        # #region agent log
-        try:
-            import json, time
-            from pathlib import Path
-            _log = Path(__file__).resolve().parent.parent / "debug-a776e8.log"
-            with open(_log, "a") as _f:
-                _f.write(json.dumps({"sessionId":"a776e8","location":"catalog_service.py:register_catalog","message":"catalog_props before load_catalog","data":{"has_s3_region":"s3.region" in catalog_props,"has_s3_access_key":"s3.access-key-id" in catalog_props,"has_s3_secret":"s3.secret-access-key" in catalog_props,"has_client_region":"client.region" in catalog_props,"catalog_props_keys":[k for k in catalog_props if "key" not in k.lower() and "secret" not in k.lower()]},"timestamp":int(time.time()*1000),"hypothesisId":"H1,H4"}) + "\n")
-        except Exception: pass
-        # #endregion
         
         try:
             # Load the catalog using pyiceberg
