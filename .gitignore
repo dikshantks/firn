@@ -2,3 +2,4 @@
 files/
 __pycache__/
 firn_venv/*
+frontend/node_modules/*
