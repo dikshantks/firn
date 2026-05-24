@@ -1,0 +1,21 @@
+backend:
+  replicas: 1
+  irsaRoleArn: ""
+  env:
+    CORS_ORIGINS: "http://localhost:3000,http://localhost:5173"
+    REPLICA_ID: "fern-dev"
+
+frontend:
+  replicas: 1
+
+mcp:
+  replicas: 1
+
+ingress:
+  enabled: false
+
+serviceMonitor:
+  enabled: false
+
+prometheusRule:
+  enabled: false

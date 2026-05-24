@@ -1,0 +1,22 @@
+backend:
+  replicas: 3
+  irsaRoleArn: ""
+  env:
+    CORS_ORIGINS: "https://fern.example.com"
+    REPLICA_ID: "fern-prod"
+
+frontend:
+  replicas: 3
+
+mcp:
+  replicas: 2
+
+ingress:
+  enabled: true
+  host: fern.example.com
+
+serviceMonitor:
+  enabled: true
+
+prometheusRule:
+  enabled: true

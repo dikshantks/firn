@@ -9,6 +9,10 @@ export const healthKeys = {
   cacheInfo: (catalog: string) => ['health', 'cache', catalog] as const,
   cachedTables: (catalog: string, filters?: Record<string, unknown>) => 
     ['health', 'tables', catalog, filters] as const,
+  cachedTable: (catalog: string, namespace: string, table: string) =>
+    ['health', 'cached-table', catalog, namespace, table] as const,
+  table: (catalog: string, namespace: string, table: string) =>
+    ['health', 'table', catalog, namespace, table] as const,
 };
 
 // Types for streaming events
@@ -97,6 +101,29 @@ export function useCachedTables(
     queryKey: healthKeys.cachedTables(catalog, options),
     queryFn: () => healthApi.getCachedTables(catalog, options),
     enabled: !!catalog,
+  });
+}
+
+/**
+ * Hook to check whether one table already has cached health data.
+ */
+export function useCachedTableHealth(catalog: string, namespace: string, table: string) {
+  return useQuery({
+    queryKey: healthKeys.cachedTable(catalog, namespace, table),
+    queryFn: () => healthApi.getCachedTable(catalog, namespace, table),
+    enabled: !!catalog && !!namespace && !!table,
+    staleTime: 60 * 1000,
+  });
+}
+
+/**
+ * Hook to get detailed health for a specific table.
+ */
+export function useTableHealth(catalog: string, namespace: string, table: string, enabled = true) {
+  return useQuery({
+    queryKey: healthKeys.table(catalog, namespace, table),
+    queryFn: () => healthApi.getTableHealth(catalog, namespace, table),
+    enabled: enabled && !!catalog && !!namespace && !!table,
   });
 }
 

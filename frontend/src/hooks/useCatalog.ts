@@ -63,8 +63,13 @@ export function useCreateCatalog() {
  * Hook to create a new catalog asynchronously (returns job ID for progress tracking).
  */
 export function useCreateCatalogAsync() {
+  const queryClient = useQueryClient();
+
   return useMutation({
     mutationFn: (data: CatalogCreate) => catalogApi.createAsync(data),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: catalogKeys.all });
+    },
   });
 }
 

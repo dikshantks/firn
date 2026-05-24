@@ -1,12 +1,17 @@
-"""SQLite-based cache for table health scan results."""
+"""Table health cache backed by MySQL when configured, SQLite otherwise."""
 
 import json
 import sqlite3
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Optional
 
+from sqlalchemy import delete, func, or_, select
+from sqlalchemy.dialects.mysql import insert as mysql_insert
+
+from app.db import is_database_enabled, session_scope
+from app.db.models import CatalogSummary, TableHealthRecord
 from app.models.health import (
     HealthStatus,
     TableHealth,
@@ -54,13 +59,16 @@ class HealthCache:
         Args:
             db_path: Path to SQLite database. Defaults to app data directory.
         """
+        self.use_database = is_database_enabled()
+
         if db_path is None:
             cache_dir = Path(__file__).parent.parent / "data"
             cache_dir.mkdir(exist_ok=True)
             db_path = str(cache_dir / "health_cache.db")
-        
+
         self.db_path = db_path
-        self._init_db()
+        if not self.use_database:
+            self._init_db()
     
     def _get_connection(self) -> sqlite3.Connection:
         """Get a database connection."""
@@ -135,6 +143,10 @@ class HealthCache:
             health: TableHealth object to cache
             scan_mode: "light" or "full"
         """
+        if self.use_database:
+            self._save_table_health_db(health, scan_mode)
+            return
+
         conn = self._get_connection()
         try:
             recommendations_json = json.dumps([
@@ -195,6 +207,10 @@ class HealthCache:
             summary: TableHealthSummary object
             scan_mode: "light" or "full"
         """
+        if self.use_database:
+            self._save_catalog_summary_db(catalog, summary, scan_mode)
+            return
+
         conn = self._get_connection()
         try:
             conn.execute("""
@@ -238,6 +254,9 @@ class HealthCache:
         Returns:
             TableHealthSummary or None if not cached or too old
         """
+        if self.use_database:
+            return self._get_cached_summary_db(catalog, max_age_minutes)
+
         conn = self._get_connection()
         try:
             row = conn.execute("""
@@ -288,6 +307,9 @@ class HealthCache:
         Returns:
             List of CachedTableHealth
         """
+        if self.use_database:
+            return self._get_tables_by_status_db(catalog, status, limit, offset)
+
         conn = self._get_connection()
         try:
             if status:
@@ -308,7 +330,62 @@ class HealthCache:
             return [self._row_to_cached_health(row) for row in rows]
         finally:
             conn.close()
-    
+
+    def get_table(
+        self,
+        catalog: str,
+        namespace: str,
+        table_name: str,
+    ) -> Optional[CachedTableHealth]:
+        """Get cached health for one table without running a fresh scan."""
+        if self.use_database:
+            return self._get_table_db(catalog, namespace, table_name)
+
+        conn = self._get_connection()
+        try:
+            row = conn.execute("""
+                SELECT * FROM table_health
+                WHERE catalog = ? AND namespace = ? AND table_name = ?
+            """, (catalog, namespace, table_name)).fetchone()
+            return self._row_to_cached_health(row) if row else None
+        finally:
+            conn.close()
+
+    def search_tables(
+        self,
+        catalog: str,
+        query: str,
+        limit: int = 50,
+    ) -> list[CachedTableHealth]:
+        """Search cached table names without calling Glue."""
+        normalized = query.strip().lower()
+        if len(normalized) < 2:
+            return []
+
+        if self.use_database:
+            return self._search_tables_db(catalog, normalized, limit)
+
+        pattern = f"%{normalized}%"
+        conn = self._get_connection()
+        try:
+            rows = conn.execute(
+                """
+                SELECT * FROM table_health
+                WHERE catalog = ?
+                  AND (
+                    LOWER(table_name) LIKE ?
+                    OR LOWER(namespace) LIKE ?
+                    OR LOWER(namespace || '.' || table_name) LIKE ?
+                  )
+                ORDER BY namespace ASC, table_name ASC
+                LIMIT ?
+                """,
+                (catalog, pattern, pattern, pattern, limit),
+            ).fetchall()
+            return [self._row_to_cached_health(row) for row in rows]
+        finally:
+            conn.close()
+
     def get_tables_needing_maintenance(
         self,
         catalog: str,
@@ -332,6 +409,11 @@ class HealthCache:
         Returns:
             List of CachedTableHealth matching criteria
         """
+        if self.use_database:
+            return self._get_tables_needing_maintenance_db(
+                catalog, min_snapshots, min_delete_files, min_small_files, limit, offset
+            )
+
         conn = self._get_connection()
         try:
             conditions = ["catalog = ?"]
@@ -373,6 +455,15 @@ class HealthCache:
         Returns:
             Age in minutes or None if no cache
         """
+        if self.use_database:
+            with session_scope() as session:
+                scanned_at = session.scalar(
+                    select(CatalogSummary.scanned_at).where(CatalogSummary.catalog == catalog)
+                )
+            if not scanned_at:
+                return None
+            return int((datetime.utcnow() - scanned_at).total_seconds() / 60)
+
         conn = self._get_connection()
         try:
             row = conn.execute("""
@@ -390,6 +481,17 @@ class HealthCache:
     
     def get_table_count(self, catalog: str) -> int:
         """Get count of cached tables for a catalog."""
+        if self.use_database:
+            with session_scope() as session:
+                return int(
+                    session.scalar(
+                        select(func.count()).select_from(TableHealthRecord).where(
+                            TableHealthRecord.catalog == catalog
+                        )
+                    )
+                    or 0
+                )
+
         conn = self._get_connection()
         try:
             row = conn.execute("""
@@ -410,6 +512,14 @@ class HealthCache:
         Returns:
             Number of rows deleted
         """
+        if self.use_database:
+            with session_scope() as session:
+                deleted = session.execute(
+                    delete(TableHealthRecord).where(TableHealthRecord.catalog == catalog)
+                ).rowcount or 0
+                session.execute(delete(CatalogSummary).where(CatalogSummary.catalog == catalog))
+                return deleted
+
         conn = self._get_connection()
         try:
             cursor = conn.execute("""
@@ -447,6 +557,195 @@ class HealthCache:
             recommendations_json=row["recommendations_json"],
             scan_mode=row["scan_mode"],
             scanned_at=datetime.fromisoformat(row["scanned_at"]),
+        )
+
+    def _save_table_health_db(self, health: TableHealth, scan_mode: str) -> None:
+        recommendations = [
+            {
+                "type": r.type.value,
+                "priority": r.priority,
+                "reason": r.reason,
+                "estimated_impact": r.estimated_impact,
+                "command_example": r.command_example,
+            }
+            for r in health.recommendations
+        ]
+        values = {
+            "catalog": health.catalog,
+            "namespace": health.namespace,
+            "table_name": health.table_name,
+            "status": health.status.value,
+            "health_score": health.health_score,
+            "total_snapshots": health.metrics.total_snapshots,
+            "total_data_files": health.metrics.total_data_files,
+            "total_delete_files": health.metrics.total_delete_files,
+            "small_files_count": health.metrics.small_files_count,
+            "total_size_gb": health.metrics.total_size_gb,
+            "avg_file_size_mb": health.metrics.avg_file_size_mb,
+            "oldest_snapshot_age_days": health.metrics.oldest_snapshot_age_days,
+            "days_since_last_write": health.metrics.days_since_last_write,
+            "issues_count": health.issues_count,
+            "warnings_count": health.warnings_count,
+            "recommendations_json": recommendations,
+            "scan_mode": scan_mode,
+            "scanned_at": datetime.utcnow(),
+        }
+        stmt = mysql_insert(TableHealthRecord).values(**values)
+        stmt = stmt.on_duplicate_key_update(**values)
+        with session_scope() as session:
+            session.execute(stmt)
+
+    def _save_catalog_summary_db(
+        self, catalog: str, summary: TableHealthSummary, scan_mode: str
+    ) -> None:
+        values = {
+            "catalog": catalog,
+            "total_tables": summary.total_tables,
+            "healthy_tables": summary.healthy_tables,
+            "warning_tables": summary.warning_tables,
+            "critical_tables": summary.critical_tables,
+            "tables_needing_snapshot_expiration": summary.tables_needing_snapshot_expiration,
+            "tables_needing_compaction": summary.tables_needing_compaction,
+            "tables_needing_manifest_rewrite": summary.tables_needing_manifest_rewrite,
+            "tables_with_delete_files": summary.tables_with_delete_files,
+            "total_wasted_storage_gb": summary.total_wasted_storage_gb,
+            "scan_mode": scan_mode,
+            "scanned_at": datetime.utcnow(),
+        }
+        stmt = mysql_insert(CatalogSummary).values(**values)
+        stmt = stmt.on_duplicate_key_update(**values)
+        with session_scope() as session:
+            session.execute(stmt)
+
+    def _get_cached_summary_db(
+        self, catalog: str, max_age_minutes: int
+    ) -> Optional[TableHealthSummary]:
+        with session_scope() as session:
+            row = session.execute(
+                select(CatalogSummary).where(
+                    CatalogSummary.catalog == catalog,
+                    CatalogSummary.scanned_at > datetime.utcnow() - timedelta(minutes=max_age_minutes),
+                )
+            ).scalar_one_or_none()
+        if not row:
+            return None
+        cache_age = (datetime.utcnow() - row.scanned_at).total_seconds() / 60
+        return TableHealthSummary(
+            total_tables=row.total_tables,
+            healthy_tables=row.healthy_tables,
+            warning_tables=row.warning_tables,
+            critical_tables=row.critical_tables,
+            tables_needing_snapshot_expiration=row.tables_needing_snapshot_expiration,
+            tables_needing_compaction=row.tables_needing_compaction,
+            tables_needing_manifest_rewrite=row.tables_needing_manifest_rewrite,
+            tables_with_delete_files=row.tables_with_delete_files,
+            total_wasted_storage_gb=row.total_wasted_storage_gb,
+            scan_mode=row.scan_mode,
+            cached_at=row.scanned_at,
+            cache_age_minutes=int(cache_age),
+        )
+
+    def _get_tables_by_status_db(
+        self,
+        catalog: str,
+        status: Optional[HealthStatus],
+        limit: int,
+        offset: int,
+    ) -> list[CachedTableHealth]:
+        query = select(TableHealthRecord).where(TableHealthRecord.catalog == catalog)
+        if status:
+            query = query.where(TableHealthRecord.status == status.value)
+        query = query.order_by(TableHealthRecord.health_score.asc()).limit(limit).offset(offset)
+        with session_scope() as session:
+            rows = session.execute(query).scalars().all()
+        return [self._record_to_cached_health(row) for row in rows]
+
+    def _get_table_db(
+        self,
+        catalog: str,
+        namespace: str,
+        table_name: str,
+    ) -> Optional[CachedTableHealth]:
+        with session_scope() as session:
+            row = session.execute(
+                select(TableHealthRecord).where(
+                    TableHealthRecord.catalog == catalog,
+                    TableHealthRecord.namespace == namespace,
+                    TableHealthRecord.table_name == table_name,
+                )
+            ).scalar_one_or_none()
+        return self._record_to_cached_health(row) if row else None
+
+    def _get_tables_needing_maintenance_db(
+        self,
+        catalog: str,
+        min_snapshots: Optional[int],
+        min_delete_files: Optional[int],
+        min_small_files: Optional[int],
+        limit: int,
+        offset: int,
+    ) -> list[CachedTableHealth]:
+        query = select(TableHealthRecord).where(TableHealthRecord.catalog == catalog)
+        filters = []
+        if min_snapshots is not None:
+            filters.append(TableHealthRecord.total_snapshots >= min_snapshots)
+        if min_delete_files is not None:
+            filters.append(TableHealthRecord.total_delete_files >= min_delete_files)
+        if min_small_files is not None:
+            filters.append(TableHealthRecord.small_files_count >= min_small_files)
+        if filters:
+            query = query.where(or_(*filters))
+        query = query.order_by(TableHealthRecord.health_score.asc()).limit(limit).offset(offset)
+        with session_scope() as session:
+            rows = session.execute(query).scalars().all()
+        return [self._record_to_cached_health(row) for row in rows]
+
+    def _search_tables_db(
+        self,
+        catalog: str,
+        query: str,
+        limit: int,
+    ) -> list[CachedTableHealth]:
+        pattern = f"%{query}%"
+        stmt = (
+            select(TableHealthRecord)
+            .where(TableHealthRecord.catalog == catalog)
+            .where(
+                or_(
+                    func.lower(TableHealthRecord.table_name).like(pattern),
+                    func.lower(TableHealthRecord.namespace).like(pattern),
+                    func.lower(
+                        func.concat(TableHealthRecord.namespace, ".", TableHealthRecord.table_name)
+                    ).like(pattern),
+                )
+            )
+            .order_by(TableHealthRecord.namespace.asc(), TableHealthRecord.table_name.asc())
+            .limit(limit)
+        )
+        with session_scope() as session:
+            rows = session.execute(stmt).scalars().all()
+        return [self._record_to_cached_health(row) for row in rows]
+
+    def _record_to_cached_health(self, row: TableHealthRecord) -> CachedTableHealth:
+        return CachedTableHealth(
+            catalog=row.catalog,
+            namespace=row.namespace,
+            table_name=row.table_name,
+            status=row.status,
+            health_score=row.health_score,
+            total_snapshots=row.total_snapshots,
+            total_data_files=row.total_data_files,
+            total_delete_files=row.total_delete_files,
+            small_files_count=row.small_files_count,
+            total_size_gb=row.total_size_gb,
+            avg_file_size_mb=row.avg_file_size_mb,
+            oldest_snapshot_age_days=row.oldest_snapshot_age_days,
+            days_since_last_write=row.days_since_last_write,
+            issues_count=row.issues_count,
+            warnings_count=row.warnings_count,
+            recommendations_json=json.dumps(row.recommendations_json),
+            scan_mode=row.scan_mode,
+            scanned_at=row.scanned_at,
         )
 
 

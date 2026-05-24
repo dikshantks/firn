@@ -8,7 +8,7 @@ from pyiceberg.catalog import Catalog
 from pyiceberg.io import FileIO
 
 from app.models import ManifestInfo, ManifestInfoWithEntries, ManifestEntry, ManifestListInfo, SnapshotDetails
-from app.utils.iceberg_helpers import get_file_name_from_path
+from app.utils.iceberg_helpers import get_file_name_from_path, json_safe_value
 
 
 class ManifestService:
@@ -82,10 +82,14 @@ class ManifestService:
             deleted_rows = record.get("deleted_rows_count", 0) or 0
             
             raw_partitions = record.get("partitions", []) or []
-            partitions = [p for p in raw_partitions if isinstance(p, dict)]
+            partitions = [
+                json_safe_value(p)
+                for p in raw_partitions
+                if isinstance(p, dict)
+            ]
 
             manifest = ManifestInfo(
-                manifest_path=record.get("manifest_path", ""),
+                manifest_path=json_safe_value(record.get("manifest_path", "")),
                 manifest_length=record.get("manifest_length", 0),
                 partition_spec_id=record.get("partition_spec_id", 0),
                 content=content,
@@ -112,7 +116,7 @@ class ManifestService:
         
         return ManifestListInfo(
             snapshot_id=snapshot_id,
-            manifest_list_path=manifest_list_path,
+            manifest_list_path=json_safe_value(manifest_list_path),
             manifests=manifests,
             total_data_files=total_data_files,
             total_delete_files=total_delete_files,
@@ -218,9 +222,9 @@ class ManifestService:
             
             # Handle both nested and flat structures
             if isinstance(data_file, dict):
-                file_path = data_file.get("file_path", "")
+                file_path = json_safe_value(data_file.get("file_path", ""))
                 file_format = data_file.get("file_format", "PARQUET")
-                partition = data_file.get("partition", {}) or {}
+                partition = json_safe_value(data_file.get("partition", {}) or {})
                 if not isinstance(partition, dict):
                     partition = {}
                 record_count = data_file.get("record_count", 0)
@@ -235,7 +239,7 @@ class ManifestService:
                 sort_order_id = data_file.get("sort_order_id", None)
             else:
                 # Fallback for unexpected structure
-                file_path = str(data_file)
+                file_path = json_safe_value(data_file)
                 file_format = "PARQUET"
                 partition = {}
                 record_count = 0
@@ -254,11 +258,11 @@ class ManifestService:
                 format_map = {0: "AVRO", 1: "ORC", 2: "PARQUET"}
                 file_format = format_map.get(file_format, "PARQUET")
             
-            # Convert column stats dicts (keys might be integers)
+            # Convert column stats dicts (keys might be integers, values may be bytes)
             def convert_stats_dict(d):
                 if d is None or not isinstance(d, dict):
                     return None
-                return {str(k): v for k, v in d.items()}
+                return {str(k): json_safe_value(v) for k, v in d.items()}
             
             entry = ManifestEntry(
                 status=record.get("status", 0),

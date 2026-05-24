@@ -5,7 +5,13 @@ from enum import Enum
 from typing import Any, Callable, Optional
 import uuid
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
+from datetime import datetime, timedelta
+
+from sqlalchemy import delete, select
+
+from app.config import settings
+from app.db import is_database_enabled, session_scope
+from app.db.models import JobRecord
 
 
 class JobStatus(str, Enum):
@@ -47,6 +53,23 @@ class JobService:
         """
         self._jobs: dict[str, Job] = {}
         self._executor = ThreadPoolExecutor(max_workers=max_workers)
+
+    @property
+    def use_database(self) -> bool:
+        """Return whether DB-backed jobs are enabled."""
+        return is_database_enabled()
+
+    def _record_to_job(self, record: JobRecord) -> Job:
+        return Job(
+            id=record.id,
+            status=JobStatus(record.status),
+            progress=record.progress,
+            message=record.message or "",
+            result=record.result_json,
+            error=record.error,
+            created_at=record.created_at,
+            updated_at=record.updated_at,
+        )
     
     def create_job(self, initial_message: str = "") -> Job:
         """
@@ -64,6 +87,21 @@ class JobService:
             status=JobStatus.PENDING,
             message=initial_message or "Job created, waiting to start..."
         )
+        if self.use_database:
+            with session_scope() as session:
+                session.add(
+                    JobRecord(
+                        id=job.id,
+                        type="generic",
+                        status=job.status.value,
+                        progress=job.progress,
+                        message=job.message,
+                        created_at=job.created_at,
+                        updated_at=job.updated_at,
+                    )
+                )
+            return job
+
         self._jobs[job_id] = job
         return job
     
@@ -90,6 +128,26 @@ class JobService:
         Returns:
             The updated Job or None if not found
         """
+        if self.use_database:
+            with session_scope() as session:
+                record = session.get(JobRecord, job_id)
+                if not record:
+                    return None
+                if status is not None:
+                    record.status = status.value
+                if progress is not None:
+                    record.progress = min(100, max(0, progress))
+                if message is not None:
+                    record.message = message
+                if result is not None:
+                    record.result_json = result
+                if error is not None:
+                    record.error = error
+                record.heartbeat_at = datetime.utcnow()
+                record.updated_at = datetime.utcnow()
+                session.flush()
+                return self._record_to_job(record)
+
         if job_id not in self._jobs:
             return None
         
@@ -119,6 +177,13 @@ class JobService:
         Returns:
             The Job or None if not found
         """
+        if self.use_database:
+            with session_scope() as session:
+                record = session.get(JobRecord, job_id)
+                if not record:
+                    return None
+                return self._record_to_job(record)
+
         return self._jobs.get(job_id)
     
     def list_jobs(self, limit: int = 100) -> list[Job]:
@@ -131,6 +196,15 @@ class JobService:
         Returns:
             List of jobs, most recent first
         """
+        if self.use_database:
+            with session_scope() as session:
+                records = session.execute(
+                    select(JobRecord)
+                    .order_by(JobRecord.created_at.desc())
+                    .limit(limit)
+                ).scalars().all()
+            return [self._record_to_job(record) for record in records]
+
         jobs = list(self._jobs.values())
         jobs.sort(key=lambda j: j.created_at, reverse=True)
         return jobs[:limit]
@@ -155,6 +229,27 @@ class JobService:
             **kwargs: Keyword arguments for the function
         """
         self._executor.submit(self._run_task, job_id, func, args, kwargs)
+
+    def _claim_job(self, job_id: str) -> bool:
+        if not self.use_database:
+            return True
+
+        with session_scope() as session:
+            record = session.execute(
+                select(JobRecord)
+                .where(
+                    JobRecord.id == job_id,
+                    JobRecord.status == JobStatus.PENDING.value,
+                )
+                .with_for_update(skip_locked=True)
+            ).scalar_one_or_none()
+            if not record:
+                return False
+            record.status = JobStatus.RUNNING.value
+            record.owner_replica = settings.replica_id
+            record.heartbeat_at = datetime.utcnow()
+            record.updated_at = datetime.utcnow()
+            return True
     
     def _run_task(
         self,
@@ -166,7 +261,12 @@ class JobService:
         """
         Internal method to run a task and handle status updates.
         """
-        self.update_job(job_id, status=JobStatus.RUNNING, message="Task started...")
+        if not self._claim_job(job_id):
+            return
+        if not self.use_database:
+            self.update_job(job_id, status=JobStatus.RUNNING, message="Task started...")
+        else:
+            self.update_job(job_id, message="Task started...")
         
         try:
             result = func(*args, job_id=job_id, **kwargs)
@@ -195,6 +295,18 @@ class JobService:
         Returns:
             Number of jobs removed
         """
+        if self.use_database:
+            cutoff = datetime.utcnow() - timedelta(seconds=max_age_seconds)
+            with session_scope() as session:
+                return session.execute(
+                    delete(JobRecord).where(
+                        JobRecord.created_at < cutoff,
+                        JobRecord.status.in_(
+                            [JobStatus.COMPLETED.value, JobStatus.FAILED.value]
+                        ),
+                    )
+                ).rowcount or 0
+
         now = datetime.utcnow()
         to_remove = []
         
@@ -207,6 +319,38 @@ class JobService:
             del self._jobs[job_id]
         
         return len(to_remove)
+
+    def delete_job(self, job_id: str) -> bool:
+        """Delete a terminal job."""
+        if self.use_database:
+            with session_scope() as session:
+                deleted = session.execute(
+                    delete(JobRecord).where(JobRecord.id == job_id)
+                ).rowcount or 0
+                return deleted > 0
+
+        return self._jobs.pop(job_id, None) is not None
+
+    def sweep_stale_running_jobs(self, max_heartbeat_age_seconds: int = 60) -> int:
+        """Mark jobs with stale heartbeats as failed."""
+        if not self.use_database:
+            return 0
+
+        cutoff = datetime.utcnow() - timedelta(seconds=max_heartbeat_age_seconds)
+        updated = 0
+        with session_scope() as session:
+            records = session.execute(
+                select(JobRecord).where(
+                    JobRecord.status == JobStatus.RUNNING.value,
+                    JobRecord.heartbeat_at < cutoff,
+                )
+            ).scalars().all()
+            for record in records:
+                record.status = JobStatus.FAILED.value
+                record.error = "Job heartbeat expired"
+                record.updated_at = datetime.utcnow()
+                updated += 1
+        return updated
 
 
 job_service = JobService()

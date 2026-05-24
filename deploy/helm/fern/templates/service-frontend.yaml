@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: fern-frontend
+  labels:
+    {{- include "fern.labels" . | nindent 4 }}
+    app.kubernetes.io/component: frontend
+spec:
+  selector:
+    app.kubernetes.io/name: fern
+    app.kubernetes.io/component: frontend
+  ports:
+    - name: http
+      port: 3000
+      targetPort: http

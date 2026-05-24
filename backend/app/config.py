@@ -38,6 +38,23 @@ class Settings(BaseSettings):
     cache_enabled: bool = True
     cache_ttl_seconds: int = 300
 
+    # Database settings
+    fern_use_db: bool = False
+    database_url: Optional[str] = None
+    db_pool_size: int = 5
+    db_max_overflow: int = 10
+    replica_id: str = "local-dev"
+
+    # Observability settings
+    otel_exporter_otlp_endpoint: Optional[str] = None
+    metrics_enabled: bool = True
+
+    # MCP service/client settings
+    fern_api_base_url: str = "http://localhost:8000"
+    fern_mcp_token: Optional[str] = None
+    mcp_request_timeout_seconds: float = 30.0
+    mcp_max_response_bytes: int = 250_000
+
     @property
     def cors_origins_list(self) -> list[str]:
         """Parse CORS origins from comma-separated string."""

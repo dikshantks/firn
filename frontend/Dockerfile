@@ -6,13 +6,15 @@ WORKDIR /app
 COPY package.json package-lock.json* ./
 
 # Install dependencies
-RUN npm install
+RUN npm config set strict-ssl false && npm install
 
 # Copy source code
 COPY . .
 
+RUN chmod +x docker-entrypoint.sh
+
 # Expose port
 EXPOSE 3000
 
-# Start development server
-CMD ["npm", "run", "dev", "--", "--host", "0.0.0.0"]
+# Sync deps on start (package.json may change via bind mount)
+ENTRYPOINT ["./docker-entrypoint.sh"]

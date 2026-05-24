@@ -1,0 +1,17 @@
+{{- if .Values.mcp.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: fern-mcp
+  labels:
+    {{- include "fern.labels" . | nindent 4 }}
+    app.kubernetes.io/component: mcp
+spec:
+  selector:
+    app.kubernetes.io/name: fern
+    app.kubernetes.io/component: mcp
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http
+{{- end }}

@@ -6,7 +6,7 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, status
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from app.services.job_service import job_service, JobStatus
 
@@ -22,9 +22,8 @@ class JobResponse(BaseModel):
     message: str
     result: Any = None
     error: str | None = None
-    
-    class Config:
-        from_attributes = True
+
+    model_config = ConfigDict(from_attributes=True)
 
 
 class JobCreatedResponse(BaseModel):
@@ -113,26 +112,19 @@ async def stream_job(job_id: str):
                 "progress": job.progress,
                 "message": job.message,
             }
+            if job.result is not None:
+                current_data["result"] = job.result
+            if job.error:
+                current_data["error"] = job.error
             
             if job.progress != last_progress or job.message != last_message:
                 yield f"data: {json.dumps(current_data)}\n\n"
                 last_progress = job.progress
                 last_message = job.message
             
-            if job.status == JobStatus.COMPLETED:
-                final_data = {
-                    **current_data,
-                    "result": job.result,
-                }
-                yield f"data: {json.dumps(final_data)}\n\n"
-                break
-            
-            if job.status == JobStatus.FAILED:
-                error_data = {
-                    **current_data,
-                    "error": job.error,
-                }
-                yield f"data: {json.dumps(error_data)}\n\n"
+            if job.status in (JobStatus.COMPLETED, JobStatus.FAILED):
+                if job.progress == last_progress and job.message == last_message:
+                    yield f"data: {json.dumps(current_data)}\n\n"
                 break
             
             await asyncio.sleep(0.3)
@@ -164,7 +156,7 @@ async def delete_job(job_id: str) -> None:
             detail="Cannot delete a running job"
         )
     
-    job_service._jobs.pop(job_id, None)
+    job_service.delete_job(job_id)
 
 
 @router.post("/cleanup", response_model=dict)

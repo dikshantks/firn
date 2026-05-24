@@ -1,8 +1,27 @@
 """Helper functions for Iceberg operations."""
 
+import base64
 from datetime import datetime
-from typing import Optional
+from typing import Any, Optional
 from urllib.parse import urlparse
+
+
+def json_safe_value(value: Any) -> Any:
+    """Recursively convert Avro/Iceberg values to JSON-serializable form."""
+    if value is None:
+        return None
+    if isinstance(value, bytes):
+        try:
+            return value.decode("utf-8")
+        except UnicodeDecodeError:
+            return base64.b64encode(value).decode("ascii")
+    if isinstance(value, dict):
+        return {str(k): json_safe_value(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [json_safe_value(v) for v in value]
+    if isinstance(value, (bool, int, float, str)):
+        return value
+    return str(value)
 
 
 def format_timestamp(timestamp_ms: int) -> str:

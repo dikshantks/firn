@@ -6,7 +6,7 @@ interface HeaderProps {
 }
 
 export function Header({ onRefresh }: HeaderProps) {
-  const [isDark, setIsDark] = useState(false);
+  const [isDark, setIsDark] = useState(true);
 
   const toggleDarkMode = () => {
     setIsDark(!isDark);

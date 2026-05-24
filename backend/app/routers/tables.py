@@ -1,5 +1,7 @@
 """Table API endpoints."""
 
+import asyncio
+import logging
 from typing import Any, Optional
 
 from fastapi import APIRouter, HTTPException, Query, status
@@ -8,6 +10,19 @@ from app.models import TableInfo, TableMetadata
 from app.services import catalog_service, MetadataService
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
+
+
+def _catalog_unavailable_error(catalog: str, error: Exception) -> HTTPException:
+    """Return a clean API error when an external catalog cannot be reached."""
+    logger.warning("Catalog '%s' is unavailable: %s", catalog, error)
+    return HTTPException(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        detail=(
+            f"Catalog '{catalog}' is unavailable. "
+            f"Check the catalog URI, network/DNS, and metastore service. Error: {error}"
+        ),
+    )
 
 
 @router.get("/namespaces", response_model=list[str])
@@ -22,7 +37,10 @@ async def list_namespaces(
             detail=f"Catalog '{catalog}' not found",
         )
     
-    namespaces = pyiceberg_catalog.list_namespaces()
+    try:
+        namespaces = await asyncio.to_thread(list, pyiceberg_catalog.list_namespaces())
+    except Exception as e:
+        raise _catalog_unavailable_error(catalog, e) from e
     return [".".join(ns) for ns in namespaces]
 
 
@@ -48,12 +66,17 @@ async def list_tables(
         )
     
     metadata_service = MetadataService(pyiceberg_catalog, catalog)
-    return metadata_service.list_tables(
-        namespace=namespace,
-        lazy=lazy,
-        limit=limit,
-        offset=offset,
-    )
+    try:
+        return await asyncio.to_thread(
+            lambda: metadata_service.list_tables(
+                namespace=namespace,
+                lazy=lazy,
+                limit=limit,
+                offset=offset,
+            )
+        )
+    except Exception as e:
+        raise _catalog_unavailable_error(catalog, e) from e
 
 
 @router.get("/{namespace}/{table}", response_model=TableMetadata)

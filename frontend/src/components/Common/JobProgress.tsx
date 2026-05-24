@@ -2,6 +2,7 @@
  * Job progress display component with real-time updates.
  */
 
+import { useEffect, useRef } from 'react';
 import { useJobProgress } from '../../hooks/useJob';
 
 interface JobProgressProps {
@@ -33,13 +34,22 @@ export function JobProgress({
     isError,
   } = useJobProgress(jobId);
 
-  if (isSuccess && onComplete && result) {
-    setTimeout(() => onComplete(result), 0);
-  }
+  const completedRef = useRef(false);
+  const erroredRef = useRef(false);
 
-  if (isError && onError && error) {
-    setTimeout(() => onError(error), 0);
-  }
+  useEffect(() => {
+    if (isSuccess && onComplete && !completedRef.current) {
+      completedRef.current = true;
+      onComplete(result);
+    }
+  }, [isSuccess, onComplete, result]);
+
+  useEffect(() => {
+    if (isError && onError && error && !erroredRef.current) {
+      erroredRef.current = true;
+      onError(error);
+    }
+  }, [isError, onError, error]);
 
   if (!jobId) {
     return null;
@@ -113,7 +123,7 @@ export function JobProgress({
         </div>
       )}
 
-      {isSuccess && result && showDetails && (
+      {isSuccess && showDetails && (
         <div className="p-3 bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800 rounded-md">
           <p className="text-sm text-green-700 dark:text-green-400 font-medium">
             Operation completed successfully

@@ -1,0 +1,26 @@
+{{- if .Values.prometheusRule.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: fern
+  labels:
+    {{- include "fern.labels" . | nindent 4 }}
+spec:
+  groups:
+    - name: fern.rules
+      rules:
+        - alert: FernHighErrorRate
+          expr: sum(rate(http_requests_total{handler!="/metrics",status=~"5.."}[5m])) / sum(rate(http_requests_total{handler!="/metrics"}[5m])) > 0.01
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: Fern API 5xx rate is above 1%
+        - alert: FernDbPoolSaturated
+          expr: fern_db_pool_size > 0 and fern_db_pool_in_use / fern_db_pool_size > 0.8
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: Fern DB pool is more than 80% in use
+{{- end }}

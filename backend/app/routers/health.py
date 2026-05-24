@@ -1,6 +1,8 @@
 """Health and maintenance API endpoints."""
 
+import asyncio
 import json
+from concurrent.futures import ThreadPoolExecutor
 from enum import Enum
 from typing import Literal, Optional
 
@@ -21,6 +23,7 @@ from app.services.health_cache import health_cache, CachedTableHealth
 from app.services.job_service import job_service, JobStatus
 
 router = APIRouter()
+_health_scan_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="health-scan")
 
 
 class ScanMode(str, Enum):
@@ -49,6 +52,37 @@ class CachedTableResponse(BaseModel):
     warnings_count: int
     scan_mode: str
     scanned_at: str
+
+
+class TableSearchResult(BaseModel):
+    """Lightweight table search hit from cached health data."""
+
+    catalog: str
+    namespace: str
+    table_name: str
+
+
+def _cached_table_response(record: CachedTableHealth) -> CachedTableResponse:
+    """Convert cached health records into API responses."""
+    return CachedTableResponse(
+        catalog=record.catalog,
+        namespace=record.namespace,
+        table_name=record.table_name,
+        status=record.status,
+        health_score=record.health_score,
+        total_snapshots=record.total_snapshots,
+        total_data_files=record.total_data_files,
+        total_delete_files=record.total_delete_files,
+        small_files_count=record.small_files_count,
+        total_size_gb=record.total_size_gb,
+        avg_file_size_mb=record.avg_file_size_mb,
+        oldest_snapshot_age_days=record.oldest_snapshot_age_days,
+        days_since_last_write=record.days_since_last_write,
+        issues_count=record.issues_count,
+        warnings_count=record.warnings_count,
+        scan_mode=record.scan_mode,
+        scanned_at=record.scanned_at.isoformat(),
+    )
 
 
 class CacheInfoResponse(BaseModel):
@@ -155,30 +189,46 @@ async def stream_health_summary(
         small_manifest_file_count=small_manifest_file_count or 10,
         small_manifest_warning_threshold=small_manifest_warning_threshold or 20,
     )
-    
-    def generate_events():
-        """Generator that yields SSE events."""
-        try:
-            health_service = HealthService(pyiceberg_catalog)
-            
-            for event in health_service.scan_all_tables_streaming(
-                catalog_name=catalog,
-                thresholds=thresholds,
-                mode=mode,
-            ):
-                # Format as SSE event
-                event_data = json.dumps(event)
-                yield f"event: {event['type']}\ndata: {event_data}\n\n"
-                
-        except Exception as e:
-            error_event = {
-                "type": "error",
-                "error": str(e),
-            }
-            yield f"event: error\ndata: {json.dumps(error_event)}\n\n"
-    
+
+    async def event_generator():
+        """Stream scan events from a worker thread so Glue/DB work does not block the API."""
+        loop = asyncio.get_running_loop()
+        queue: asyncio.Queue[dict | None] = asyncio.Queue()
+
+        def run_scan() -> None:
+            try:
+                health_service = HealthService(pyiceberg_catalog)
+                for event in health_service.scan_all_tables_streaming(
+                    catalog_name=catalog,
+                    thresholds=thresholds,
+                    mode=mode,
+                ):
+                    future = asyncio.run_coroutine_threadsafe(queue.put(event), loop)
+                    future.result()
+            except Exception as exc:
+                future = asyncio.run_coroutine_threadsafe(
+                    queue.put({"type": "error", "error": str(exc)}),
+                    loop,
+                )
+                future.result()
+            finally:
+                future = asyncio.run_coroutine_threadsafe(queue.put(None), loop)
+                future.result()
+
+        scan_future = loop.run_in_executor(_health_scan_executor, run_scan)
+
+        while True:
+            event = await queue.get()
+            if event is None:
+                break
+            event_type = event.get("type", "message")
+            event_data = json.dumps(event)
+            yield f"event: {event_type}\ndata: {event_data}\n\n"
+
+        await scan_future
+
     return StreamingResponse(
-        generate_events(),
+        event_generator(),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -539,26 +589,46 @@ async def get_cached_tables(
         )
     
     return [
-        CachedTableResponse(
-            catalog=r.catalog,
-            namespace=r.namespace,
-            table_name=r.table_name,
-            status=r.status,
-            health_score=r.health_score,
-            total_snapshots=r.total_snapshots,
-            total_data_files=r.total_data_files,
-            total_delete_files=r.total_delete_files,
-            small_files_count=r.small_files_count,
-            total_size_gb=r.total_size_gb,
-            avg_file_size_mb=r.avg_file_size_mb,
-            oldest_snapshot_age_days=r.oldest_snapshot_age_days,
-            days_since_last_write=r.days_since_last_write,
-            issues_count=r.issues_count,
-            warnings_count=r.warnings_count,
-            scan_mode=r.scan_mode,
-            scanned_at=r.scanned_at.isoformat(),
-        )
+        _cached_table_response(r)
         for r in results
+    ]
+
+
+@router.get("/tables/cached/{namespace}/{table}", response_model=Optional[CachedTableResponse])
+async def get_cached_table(
+    namespace: str,
+    table: str,
+    catalog: str = Query(..., description="Catalog name"),
+) -> Optional[CachedTableResponse]:
+    """
+    Get cached health for one table without triggering a health scan.
+
+    Returns null when the table has not been scanned yet.
+    """
+    result = health_cache.get_table(catalog, namespace, table)
+    return _cached_table_response(result) if result else None
+
+
+@router.get("/tables/search", response_model=list[TableSearchResult])
+async def search_cached_tables(
+    catalog: str = Query(..., description="Catalog name"),
+    q: str = Query(..., min_length=2, description="Search query"),
+    limit: int = Query(50, ge=1, le=200, description="Maximum results"),
+) -> list[TableSearchResult]:
+    """
+    Search scanned tables by name from the health cache.
+
+    Uses MySQL/SQLite only (no Glue calls), so it stays fast while a health
+    scan is running and populating the cache incrementally.
+    """
+    results = await asyncio.to_thread(health_cache.search_tables, catalog, q, limit)
+    return [
+        TableSearchResult(
+            catalog=row.catalog,
+            namespace=row.namespace,
+            table_name=row.table_name,
+        )
+        for row in results
     ]
 
 

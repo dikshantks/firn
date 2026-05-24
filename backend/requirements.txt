@@ -7,8 +7,13 @@ python-multipart>=0.0.6
 pydantic>=2.5.0
 pydantic-settings>=2.1.0
 
+# Database
+sqlalchemy>=2.0.29
+alembic>=1.13.1
+PyMySQL>=1.1.0
+
 # Apache Iceberg (with Hive and Glue support)
-pyiceberg[hive,glue,s3fs]
+pyiceberg[hive,glue]>=0.11.0,<0.12.0
 
 
 # AWS/Storage
@@ -22,6 +27,15 @@ pandas>=2.0.0
 # Utilities
 python-dotenv>=1.0.0
 httpx>=0.26.0
+structlog>=24.1.0
+prometheus-fastapi-instrumentator>=6.1.0
+opentelemetry-api>=1.24.0
+opentelemetry-sdk>=1.24.0
+opentelemetry-exporter-otlp>=1.24.0
+opentelemetry-instrumentation-fastapi>=0.45b0
+opentelemetry-instrumentation-sqlalchemy>=0.45b0
+opentelemetry-instrumentation-botocore>=0.45b0
+mcp>=1.9.0
 
 # Testing
 pytest>=7.4.0

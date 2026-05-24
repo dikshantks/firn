@@ -4,10 +4,14 @@ from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 
 from fastapi import FastAPI
+from fastapi import HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import text
 
 from app.config import settings
+from app.db import is_database_enabled, session_scope
 from app.models import CatalogType
+from app.observability import setup_observability
 from app.routers import (
     catalogs,
     tables,
@@ -21,6 +25,7 @@ from app.routers import (
     jobs,
 )
 from app.services import catalog_service
+from app.services.job_service import job_service
 
 
 @asynccontextmanager
@@ -28,6 +33,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Application lifespan handler for startup/shutdown events."""
     # Startup
     print("Starting Iceberg Metadata Visualizer API...")
+
+    if is_database_enabled():
+        swept = job_service.sweep_stale_running_jobs()
+        print(f"Database mode enabled; swept {swept} stale running jobs")
 
     # Auto-register default catalog if configured via environment variables
     if settings.default_catalog_name and settings.default_catalog_uri:
@@ -66,6 +75,7 @@ app = FastAPI(
     version="0.1.0",
     lifespan=lifespan,
 )
+setup_observability(app)
 
 # Configure CORS
 app.add_middleware(
@@ -104,6 +114,26 @@ async def root() -> dict:
 async def health() -> dict:
     """Health check endpoint."""
     return {"status": "healthy"}
+
+
+@app.get("/healthz/live")
+async def live_health() -> dict:
+    """Liveness probe endpoint."""
+    return {"status": "live"}
+
+
+@app.get("/healthz/ready")
+async def ready_health() -> dict:
+    """Readiness probe endpoint."""
+    if not is_database_enabled():
+        return {"status": "ready", "database": "disabled"}
+
+    try:
+        with session_scope() as session:
+            session.execute(text("SELECT 1"))
+        return {"status": "ready", "database": "connected"}
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"database unavailable: {exc}") from exc
 
 
 if __name__ == "__main__":

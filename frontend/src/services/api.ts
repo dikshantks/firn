@@ -365,6 +365,39 @@ export interface CachedTableHealth {
   scanned_at: string;
 }
 
+export interface TableHealth {
+  catalog: string;
+  namespace: string;
+  table_name: string;
+  status: 'healthy' | 'warning' | 'critical';
+  health_score: number;
+  metrics: {
+    total_snapshots: number;
+    oldest_snapshot_age_days: number | null;
+    snapshots_last_7_days: number;
+    snapshots_last_30_days: number;
+    total_data_files: number;
+    total_delete_files: number;
+    small_files_count: number;
+    avg_file_size_mb: number;
+    total_size_gb: number;
+    total_manifests: number;
+    small_manifests_count: number;
+    partition_count?: number | null;
+    days_since_last_write?: number | null;
+  };
+  recommendations: Array<{
+    type: string;
+    priority: string;
+    reason: string;
+    estimated_impact: string;
+    command_example?: string | null;
+  }>;
+  issues_count: number;
+  warnings_count: number;
+  last_checked: string;
+}
+
 export interface ScanTriggerResponse {
   job_id: string;
   mode: string;
@@ -419,6 +452,42 @@ export const healthApi = {
     const response = await apiClient.get<CachedTableHealth[]>('/api/health/tables/cached', {
       params: { catalog, ...options },
     });
+    return response.data;
+  },
+
+  getCachedTable: async (
+    catalog: string,
+    namespace: string,
+    table: string
+  ): Promise<CachedTableHealth | null> => {
+    const response = await apiClient.get<CachedTableHealth | null>(
+      `/api/health/tables/cached/${namespace}/${table}`,
+      { params: { catalog } }
+    );
+    return response.data;
+  },
+
+  searchCachedTables: async (
+    catalog: string,
+    query: string,
+    limit = 50
+  ): Promise<Array<{ catalog: string; namespace: string; table_name: string }>> => {
+    const response = await apiClient.get<Array<{ catalog: string; namespace: string; table_name: string }>>(
+      '/api/health/tables/search',
+      { params: { catalog, q: query, limit } }
+    );
+    return response.data;
+  },
+
+  getTableHealth: async (
+    catalog: string,
+    namespace: string,
+    table: string
+  ): Promise<TableHealth> => {
+    const response = await apiClient.get<TableHealth>(
+      `/api/health/tables/${namespace}/${table}`,
+      { params: { catalog } }
+    );
     return response.data;
   },
 

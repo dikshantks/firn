@@ -1,0 +1,16 @@
+{{- if .Values.serviceMonitor.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: fern-backend
+  labels:
+    {{- include "fern.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: fern
+      app.kubernetes.io/component: backend
+  endpoints:
+    - port: http
+      path: /metrics
+{{- end }}

@@ -1,0 +1,35 @@
+{{- if .Values.mcp.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fern-mcp
+  labels:
+    {{- include "fern.labels" . | nindent 4 }}
+    app.kubernetes.io/component: mcp
+spec:
+  replicas: {{ .Values.mcp.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: fern
+      app.kubernetes.io/component: mcp
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: fern
+        app.kubernetes.io/component: mcp
+    spec:
+      containers:
+        - name: mcp
+          image: "{{ .Values.mcp.image }}:{{ .Values.mcp.tag }}"
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8000
+          env:
+            {{- range $key, $value := .Values.mcp.env }}
+            - name: {{ $key }}
+              value: {{ $value | quote }}
+            {{- end }}
+          resources:
+            {{- toYaml .Values.mcp.resources | nindent 12 }}
+{{- end }}

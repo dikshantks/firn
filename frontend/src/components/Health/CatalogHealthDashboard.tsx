@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import {
   Database,
   CheckCircle,
@@ -57,13 +57,15 @@ export function CatalogHealthDashboard({ catalogName, onBack, onViewTables }: Ca
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
   const [useStreaming, setUseStreaming] = useState(false);
   const [streamingMode, setStreamingMode] = useState<'light' | 'full'>('light');
+  const autoScanStartedRef = useRef(false);
   
   const { data: summary, isLoading, error, refetch } = useHealthSummary(catalogName, {
     mode: scanMode,
     thresholds,
   });
   
-  const { data: cacheInfo, refetch: refetchCacheInfo } = useHealthCacheInfo(catalogName);
+  const { data: cacheInfo, isLoading: isCacheLoading, refetch: refetchCacheInfo } =
+    useHealthCacheInfo(catalogName);
   const triggerScan = useTriggerHealthScan();
   useJobProgress(activeJobId);
   
@@ -73,19 +75,39 @@ export function CatalogHealthDashboard({ catalogName, onBack, onViewTables }: Ca
     thresholds,
   });
 
-  // Check if we should auto-start streaming (no cache available)
-  useEffect(() => {
-    if (error && !summary && cacheInfo?.has_cache === false && !streaming.isStreaming && !useStreaming) {
-      // No cache and error - prompt user to start streaming
-    }
-  }, [error, summary, cacheInfo, streaming.isStreaming, useStreaming]);
-
   const handleStartStreaming = (mode: 'light' | 'full') => {
     setStreamingMode(mode);
     setUseStreaming(true);
     streaming.reset();
     setTimeout(() => streaming.start(), 0);
   };
+
+  // Auto-start a light scan when no cached health data exists.
+  useEffect(() => {
+    if (
+      autoScanStartedRef.current ||
+      isCacheLoading ||
+      streaming.isStreaming ||
+      useStreaming
+    ) {
+      return;
+    }
+
+    const noCachedData = cacheInfo?.has_cache === false;
+    const summaryUnavailable = Boolean(error) && !summary;
+
+    if (noCachedData || summaryUnavailable) {
+      autoScanStartedRef.current = true;
+      handleStartStreaming('light');
+    }
+  }, [
+    isCacheLoading,
+    cacheInfo?.has_cache,
+    error,
+    summary,
+    streaming.isStreaming,
+    useStreaming,
+  ]);
 
   const handleStopStreaming = () => {
     streaming.stop();
@@ -302,8 +324,18 @@ export function CatalogHealthDashboard({ catalogName, onBack, onViewTables }: Ca
     );
   }
 
-  // Show error state with streaming option
-  if (error && !summary) {
+  // Show loading while cache info is fetched or auto-scan is starting.
+  if ((isCacheLoading || (cacheInfo?.has_cache === false && !streaming.isStreaming && !useStreaming)) && !summary) {
+    return (
+      <div className="flex flex-col items-center justify-center h-full p-8">
+        <Loader2 className="w-12 h-12 animate-spin text-iceberg mb-4" />
+        <p className="text-gray-500 dark:text-gray-400">Preparing health scan...</p>
+      </div>
+    );
+  }
+
+  // Show error state with manual scan options if auto-scan did not start.
+  if (error && !summary && !streaming.isStreaming && !useStreaming) {
     const isNoCache = cacheInfo?.has_cache === false;
     
     return (

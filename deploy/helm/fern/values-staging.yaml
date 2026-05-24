@@ -1,0 +1,22 @@
+backend:
+  replicas: 2
+  irsaRoleArn: ""
+  env:
+    CORS_ORIGINS: "https://fern-staging.example.com"
+    REPLICA_ID: "fern-staging"
+
+frontend:
+  replicas: 2
+
+mcp:
+  replicas: 1
+
+ingress:
+  enabled: true
+  host: fern-staging.example.com
+
+serviceMonitor:
+  enabled: true
+
+prometheusRule:
+  enabled: true
