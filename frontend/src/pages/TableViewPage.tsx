@@ -9,6 +9,8 @@ import {
   FileText,
   Layers,
   Wrench,
+  RefreshCw,
+  Loader2,
 } from 'lucide-react';
 import { SnapshotDAG } from '../components/Visualization/SnapshotDAG';
 import { ManifestTree } from '../components/Visualization/ManifestTree';
@@ -20,8 +22,8 @@ import { DataFileDetail } from '../components/Details/DataFileDetail';
 import { StorageStats } from '../components/Analytics/StorageStats';
 import { OperationTimeline } from '../components/Analytics/OperationTimeline';
 import { TableOptimizationSuggestions } from '../components/Health/TableOptimizationSuggestions';
-import { useTableMetadata } from '../hooks/useIcebergData';
-import { useCachedTableHealth } from '../hooks/useHealth';
+import { useSnapshotGraph, useTableMetadata } from '../hooks/useIcebergData';
+import { useCachedTableHealth, useScanTableHealth } from '../hooks/useHealth';
 import {
   appTabFromPathTab,
   decodeSegment,
@@ -48,7 +50,10 @@ export function TableViewPage() {
   const [selectedFile, setSelectedFile] = useState<string | undefined>();
 
   const { data: tableMetadata } = useTableMetadata(catalog, namespace, table);
-  const { data: cachedTableHealth } = useCachedTableHealth(catalog, namespace, table);
+  const { data: snapshotGraph } = useSnapshotGraph(catalog, namespace, table);
+  const { data: cachedTableHealth, refetch: refetchCachedHealth } = useCachedTableHealth(catalog, namespace, table);
+  const scanTableHealth = useScanTableHealth();
+  const [isScanningHealth, setIsScanningHealth] = useState(false);
   const hasHealthData = Boolean(cachedTableHealth);
 
   useEffect(() => {
@@ -62,6 +67,26 @@ export function TableViewPage() {
       navigate(tabPathFromAppTab(catalog, namespace, table, 'snapshots'), { replace: true });
     }
   }, [activeTab, hasHealthData, catalog, namespace, table, navigate]);
+
+  useEffect(() => {
+    if (!snapshotGraph?.nodes.length) {
+      return;
+    }
+
+    const latestSnapshot =
+      snapshotGraph.nodes.find((snapshot) => snapshot.snapshot_id === snapshotGraph.current_snapshot_id) ??
+      [...snapshotGraph.nodes].sort((a, b) => b.timestamp_ms - a.timestamp_ms)[0];
+
+    if (!latestSnapshot) {
+      return;
+    }
+
+    setSelectedSnapshot((current) =>
+      current && snapshotGraph.nodes.some((snapshot) => snapshot.snapshot_id === current.snapshot_id)
+        ? current
+        : latestSnapshot
+    );
+  }, [snapshotGraph]);
 
   const handleTabChange = (tab: AppViewTab) => {
     navigate(tabPathFromAppTab(catalog, namespace, table, tab));
@@ -79,6 +104,18 @@ export function TableViewPage() {
   const handleFileSelect = (file: DataFileInfo | ManifestEntry) => {
     setSelectedFile(file.file_path);
     handleTabChange('files');
+  };
+
+  const handleScanHealth = async (mode: 'light' | 'full' = 'light') => {
+    setIsScanningHealth(true);
+    try {
+      await scanTableHealth.mutateAsync({ catalog, namespace, table, mode });
+      await refetchCachedHealth();
+    } catch (scanError) {
+      console.error('Failed to scan table health:', scanError);
+    } finally {
+      setIsScanningHealth(false);
+    }
   };
 
   const tabs: { id: AppViewTab; label: string; icon: ReactNode }[] = [
@@ -108,7 +145,27 @@ export function TableViewPage() {
             <p className="text-sm text-gray-500">
               {catalog} | Format v{tableMetadata?.format_version || '?'} |{' '}
               {tableMetadata?.snapshot_count || 0} snapshots
+              {cachedTableHealth && (
+                <span className="ml-2">
+                  | Health {cachedTableHealth.health_score}/100 ({cachedTableHealth.status})
+                </span>
+              )}
             </p>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => void handleScanHealth('light')}
+              disabled={isScanningHealth}
+              className="flex items-center gap-2 px-3 py-2 text-sm font-medium text-iceberg bg-iceberg/10 hover:bg-iceberg/20 rounded-lg transition-colors disabled:opacity-50"
+            >
+              {isScanningHealth ? (
+                <Loader2 className="w-4 h-4 animate-spin" />
+              ) : (
+                <RefreshCw className="w-4 h-4" />
+              )}
+              {hasHealthData ? 'Re-scan Health' : 'Scan Health'}
+            </button>
           </div>
         </div>
 
@@ -139,6 +196,7 @@ export function TableViewPage() {
                 catalog={catalog}
                 namespace={namespace}
                 table={table}
+                selectedSnapshotId={selectedSnapshot?.snapshot_id}
                 onSnapshotSelect={handleSnapshotSelect}
                 onCompareSelect={handleCompareSelect}
               />

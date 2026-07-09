@@ -1,4 +1,4 @@
-"""FastAPI application entry point."""
+import logging
 
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
@@ -27,16 +27,23 @@ from app.routers import (
 from app.services import catalog_service
 from app.services.job_service import job_service
 
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(levelname)-8s %(asctime)s %(name)s - %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+logger = logging.getLogger(__name__)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Application lifespan handler for startup/shutdown events."""
     # Startup
-    print("Starting Iceberg Metadata Visualizer API...")
+    logger.info("Starting fern API...")
 
     if is_database_enabled():
         swept = job_service.sweep_stale_running_jobs()
-        print(f"Database mode enabled; swept {swept} stale running jobs")
+        logger.info("Database mode enabled; swept %d stale running jobs", swept)
 
     # Auto-register default catalog if configured via environment variables
     if settings.default_catalog_name and settings.default_catalog_uri:
@@ -57,16 +64,16 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 catalog_type=catalog_type,
                 properties=properties,
             )
-            print(
-                f"Auto-registered default catalog '{info.name}': "
-                f"{info.namespace_count} namespaces, {info.table_count} tables"
+            logger.info(
+                "Auto-registered default catalog '%s': %d namespaces, %d tables",
+                info.name, info.namespace_count, info.table_count,
             )
-        except Exception as e:
-            print(f"Warning: failed to auto-register default catalog: {e}")
+        except Exception as exc:
+            logger.warning("Failed to auto-register default catalog: %s", exc)
 
     yield
     # Shutdown
-    print("Shutting down Iceberg Metadata Visualizer API...")
+    logger.info("Shutting down Iceberg Metadata Visualizer API...")
 
 
 app = FastAPI(

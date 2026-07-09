@@ -65,6 +65,40 @@ def setup_tracing(app: FastAPI) -> None:
             pass
 
 
+def _patch_instrumentator_route_walk() -> None:
+    """Skip path-less routes in prometheus-fastapi-instrumentator's route walk.
+
+    FastAPI >= 0.137 stores lazy ``_IncludedRouter`` objects in ``app.routes``;
+    these have no ``.path`` attribute. The instrumentator reads ``route.path``
+    unconditionally, which raises ``AttributeError`` on every request when
+    metrics middleware is enabled. Skipping path-less routes only affects the
+    metric handler label (falls back to the request URL path), not routing.
+    """
+    from prometheus_fastapi_instrumentator import routing as instrumentator_routing
+    from starlette.routing import Match, Mount
+    from starlette.types import Scope
+
+    def _get_route_name(
+        scope: Scope, routes: list, route_name: str | None = None
+    ) -> str | None:
+        for route in routes:
+            if getattr(route, "path", None) is None:
+                continue
+            match, child_scope = route.matches(scope)
+            if match == Match.FULL:
+                route_name = route.path
+                child_scope = {**scope, **child_scope}
+                if isinstance(route, Mount) and route.routes:
+                    child = _get_route_name(child_scope, route.routes, route_name)
+                    route_name = None if child is None else route_name + child
+                return route_name
+            if match == Match.PARTIAL and route_name is None:
+                route_name = route.path
+        return None
+
+    instrumentator_routing._get_route_name = _get_route_name
+
+
 def setup_metrics(app: FastAPI) -> None:
     """Expose Prometheus metrics when instrumentation packages are installed."""
     if not settings.metrics_enabled:
@@ -77,6 +111,8 @@ def setup_metrics(app: FastAPI) -> None:
         from app.db import get_engine, is_database_enabled
     except Exception:
         return
+
+    _patch_instrumentator_route_walk()
 
     db_pool_in_use = Gauge("fern_db_pool_in_use", "SQLAlchemy DB connections in use")
     db_pool_size = Gauge("fern_db_pool_size", "SQLAlchemy DB pool size")

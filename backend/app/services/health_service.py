@@ -1,10 +1,15 @@
 """Service for analyzing table health and generating maintenance recommendations."""
 
+import logging
+import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from typing import Generator, Literal, Optional
 
 from pyiceberg.catalog import Catalog
 from pyiceberg.table import Table
+
+logger = logging.getLogger(__name__)
 
 from app.models.health import (
     HealthStatus,
@@ -22,6 +27,9 @@ ScanMode = Literal["light", "full"]
 class HealthService:
     """Service for analyzing table health and maintenance needs."""
     
+    # Number of tables to scan concurrently. Can be overridden via SCAN_CONCURRENCY env var.
+    SCAN_CONCURRENCY: int = int(os.environ.get("SCAN_CONCURRENCY", "20"))
+
     # Configurable thresholds
     SNAPSHOT_WARNING_THRESHOLD = 50
     SNAPSHOT_CRITICAL_THRESHOLD = 100
@@ -140,50 +148,60 @@ class HealthService:
                 progress=10,
                 message=f"Found {total_namespaces} namespaces, {total_tables} tables. Starting {mode} scan..."
             )
-        
+        logger.info(
+            "Found %d namespaces, %d tables. Starting %s scan (concurrency=%d)...",
+            total_namespaces, total_tables, mode, self.SCAN_CONCURRENCY,
+        )
+
         processed = 0
-        for ns_idx, namespace in enumerate(namespaces):
+
+        def _analyze(namespace_str: str, table_name: str):
+            return self.analyze_table_health(
+                namespace_str,
+                table_name,
+                catalog_name,
+                thresholds=thresholds,
+                mode=mode,
+            )
+
+        # Build a flat list of (namespace_str, table_name) tasks across all namespaces
+        all_tasks: list[tuple[str, str]] = []
+        for namespace in namespaces:
             namespace_str = ".".join(namespace)
-            tables = tables_by_namespace[namespace]
-            
-            for table_identifier in tables:
+            for table_identifier in tables_by_namespace[namespace]:
+                all_tasks.append((namespace_str, table_identifier[-1]))
+
+        with ThreadPoolExecutor(max_workers=self.SCAN_CONCURRENCY) as pool:
+            future_to_task = {
+                pool.submit(_analyze, ns_str, tbl): (ns_str, tbl)
+                for ns_str, tbl in all_tasks
+            }
+            for future in as_completed(future_to_task):
+                ns_str, tbl = future_to_task[future]
                 try:
-                    table_name = table_identifier[-1]
-                    health = self.analyze_table_health(
-                        namespace_str,
-                        table_name,
-                        catalog_name,
-                        thresholds=thresholds,
-                        mode=mode,
-                    )
-                    
-                    # Apply filter
+                    health = future.result()
                     if min_snapshots is None or health.metrics.total_snapshots >= min_snapshots:
                         results.append(health)
-                    
+                except Exception as exc:
+                    logger.error("Error analyzing %s.%s: %s", ns_str, tbl, exc)
+                finally:
                     processed += 1
-                    
-                    # Update progress every 100 tables or at end of namespace
+                    # Update progress every 100 tables or at end of scan
                     if job_id and (processed % 100 == 0 or processed == total_tables):
                         progress = 10 + int((processed / total_tables) * 85)
                         job_service.update_job(
                             job_id,
                             progress=progress,
-                            message=f"Scanned {processed}/{total_tables} tables ({namespace_str})..."
+                            message=f"Scanned {processed}/{total_tables} tables..."
                         )
-                        
-                except Exception as e:
-                    print(f"Error analyzing {table_identifier}: {e}")
-                    processed += 1
-                    continue
-        
+
         if job_id:
             job_service.update_job(
                 job_id,
                 progress=95,
                 message=f"Scan complete. Processing {len(results)} results..."
             )
-        
+        logger.info("Scan complete. %d tables processed, %d results collected.", processed, len(results))
         return results
     
     def scan_all_tables_streaming(
@@ -229,45 +247,51 @@ class HealthService:
             "tables_total": total_tables,
             "mode": mode,
         }
-        
+        logger.info(
+            "Streaming scan: %d namespaces, %d tables, mode=%s, concurrency=%d",
+            total_namespaces, total_tables, mode, self.SCAN_CONCURRENCY,
+        )
+
         # Clear old cache for this catalog before starting
         health_cache.clear_catalog_cache(catalog_name)
-        
+
         all_health: list[TableHealth] = []
         processed_tables = 0
-        
+
         for ns_idx, namespace in enumerate(namespaces):
             namespace_str = ".".join(namespace)
             tables = tables_by_namespace[namespace]
             namespace_health: list[TableHealth] = []
-            
-            for table_identifier in tables:
-                try:
-                    table_name = table_identifier[-1]
-                    health = self.analyze_table_health(
-                        namespace_str,
-                        table_name,
-                        catalog_name,
-                        thresholds=thresholds,
-                        mode=mode,
-                    )
-                    namespace_health.append(health)
-                    all_health.append(health)
-                    
-                    # Cache individual table health as we go
-                    health_cache.save_table_health(health, scan_mode=mode)
-                    
-                except Exception as e:
-                    print(f"Error analyzing {table_identifier}: {e}")
-                    continue
-                finally:
-                    processed_tables += 1
-            
+
+            def _analyze_ns(table_identifier, _ns=namespace_str):
+                table_name = table_identifier[-1]
+                return self.analyze_table_health(
+                    _ns,
+                    table_name,
+                    catalog_name,
+                    thresholds=thresholds,
+                    mode=mode,
+                )
+
+            with ThreadPoolExecutor(max_workers=self.SCAN_CONCURRENCY) as pool:
+                future_to_id = {pool.submit(_analyze_ns, tid): tid for tid in tables}
+                for future in as_completed(future_to_id):
+                    tid = future_to_id[future]
+                    try:
+                        health = future.result()
+                        namespace_health.append(health)
+                        all_health.append(health)
+                        health_cache.save_table_health(health, scan_mode=mode)
+                    except Exception as exc:
+                        logger.error("Error analyzing %s: %s", tid, exc)
+                    finally:
+                        processed_tables += 1
+
             # Compute namespace-level summary
             ns_healthy = sum(1 for h in namespace_health if h.status == HealthStatus.HEALTHY)
             ns_warning = sum(1 for h in namespace_health if h.status == HealthStatus.WARNING)
             ns_critical = sum(1 for h in namespace_health if h.status == HealthStatus.CRITICAL)
-            
+
             # Yield namespace completion event
             yield {
                 "type": "namespace_complete",
@@ -590,8 +614,8 @@ class HealthService:
                 )
                 if file.file_size_in_bytes < small_file_size_bytes:
                     small_files_count += 1
-        except Exception as e:
-            print(f"Error scanning files: {e}")
+        except Exception as exc:
+            logger.error("Error scanning files for table: %s", exc)
         
         # Get delete file count from snapshot summary as fallback
         current_snapshot = table.current_snapshot()

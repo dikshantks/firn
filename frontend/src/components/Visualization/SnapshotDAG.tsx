@@ -1,10 +1,11 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import ReactFlow, {
   Node,
   Edge,
   Background,
   Controls,
   MiniMap,
+  ReactFlowInstance,
   useNodesState,
   useEdgesState,
   NodeProps,
@@ -35,6 +36,7 @@ interface SnapshotDAGProps {
   catalog: string;
   namespace: string;
   table: string;
+  selectedSnapshotId?: string;
   onSnapshotSelect: (snapshot: SnapshotInfo) => void;
   onCompareSelect?: (snapshot1: SnapshotInfo, snapshot2: SnapshotInfo) => void;
 }
@@ -185,10 +187,10 @@ const nodeTypes = {
 };
 
 function SnapshotDetailsList({ details }: { details: SnapshotDetails[] }) {
-  const [expandedSnapshots, setExpandedSnapshots] = useState<Set<number>>(new Set());
+  const [expandedSnapshots, setExpandedSnapshots] = useState<Set<string>>(new Set());
   const [expandedManifests, setExpandedManifests] = useState<Set<string>>(new Set());
 
-  const toggleSnapshot = (id: number) => {
+  const toggleSnapshot = (id: string) => {
     setExpandedSnapshots((prev) => {
       const next = new Set(prev);
       if (next.has(id)) next.delete(id);
@@ -308,12 +310,14 @@ export function SnapshotDAG({
   catalog,
   namespace,
   table,
+  selectedSnapshotId,
   onSnapshotSelect,
   onCompareSelect,
 }: SnapshotDAGProps) {
   const { data: graph, isLoading, error } = useSnapshotGraph(catalog, namespace, table);
   const [selectedNodes, setSelectedNodes] = useState<string[]>([]);
   const [showDetails, setShowDetails] = useState(false);
+  const reactFlowRef = useRef<ReactFlowInstance | null>(null);
   const {
     data: detailsData,
     isLoading: detailsLoading,
@@ -362,7 +366,7 @@ export function SnapshotDAG({
     if (hasDetails && detailsData) {
       const manifestMap = new Map<
         string,
-        { manifest: ManifestInfoWithEntries; snapshotIds: number[] }
+        { manifest: ManifestInfoWithEntries; snapshotIds: string[] }
       >();
 
       detailsData.forEach((d) => {
@@ -422,11 +426,52 @@ export function SnapshotDAG({
 
   // Update nodes when graph or details change
   useEffect(() => {
-    if (initialNodes.length > 0) {
-      setNodes(initialNodes);
-      setEdges(initialEdges);
-    }
+    setNodes(initialNodes);
+    setEdges(initialEdges);
   }, [initialNodes, initialEdges, setNodes, setEdges]);
+
+  useEffect(() => {
+    if (!graph?.nodes.length) {
+      setSelectedNodes([]);
+      return;
+    }
+
+    if (selectedSnapshotId && graph.nodes.some((snapshot) => snapshot.snapshot_id === selectedSnapshotId)) {
+      setSelectedNodes([`snap-${selectedSnapshotId}`]);
+      return;
+    }
+
+    const latestSnapshot =
+      graph.nodes.find((snapshot) => snapshot.snapshot_id === graph.current_snapshot_id) ??
+      [...graph.nodes].sort((a, b) => b.timestamp_ms - a.timestamp_ms)[0];
+
+    setSelectedNodes(latestSnapshot ? [`snap-${latestSnapshot.snapshot_id}`] : []);
+  }, [graph, selectedSnapshotId]);
+
+  useEffect(() => {
+    if (!reactFlowRef.current || !graph?.nodes.length || !initialNodes.length) {
+      return;
+    }
+
+    const focusSnapshot =
+      graph.nodes.find((snapshot) => snapshot.snapshot_id === selectedSnapshotId) ??
+      graph.nodes.find((snapshot) => snapshot.snapshot_id === graph.current_snapshot_id) ??
+      [...graph.nodes].sort((a, b) => b.timestamp_ms - a.timestamp_ms)[0];
+
+    if (!focusSnapshot) {
+      return;
+    }
+
+    const focusNode = initialNodes.find((node) => node.id === `snap-${focusSnapshot.snapshot_id}`);
+    if (!focusNode) {
+      return;
+    }
+
+    reactFlowRef.current.setCenter(focusNode.position.x + 90, focusNode.position.y + 60, {
+      zoom: graph.nodes.length > 25 ? 0.8 : 1,
+      duration: 400,
+    });
+  }, [graph, initialNodes, selectedSnapshotId]);
 
   const onNodeClick = useCallback(
     (_: React.MouseEvent, node: Node) => {
@@ -543,14 +588,15 @@ export function SnapshotDAG({
       </div>
       <div style={{ height: graphHeight, minHeight: 200 }} className="shrink-0">
         <ReactFlow
+          onInit={(instance) => {
+            reactFlowRef.current = instance;
+          }}
           nodes={nodes}
           edges={edges}
           onNodesChange={onNodesChange}
           onEdgesChange={onEdgesChange}
           onNodeClick={onNodeClick}
           nodeTypes={nodeTypes}
-          fitView
-          fitViewOptions={{ padding: 0.2 }}
           minZoom={0.1}
           maxZoom={2}
         >

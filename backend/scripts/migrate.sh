@@ -35,13 +35,10 @@ if "alembic_version" in tables:
         sys.exit(0)
 
 existing = REQUIRED_TABLES & tables
-if existing == REQUIRED_TABLES:
-    print("Control-plane tables already exist; stamping Alembic head")
-    subprocess.run(["alembic", "stamp", "head"], check=True)
-elif existing:
+if existing:
     print(
-        f"Partial control-plane schema detected "
-        f"({len(existing)}/{len(REQUIRED_TABLES)} tables); resuming migration"
+        f"Control-plane schema detected "
+        f"({len(existing)}/{len(REQUIRED_TABLES)} tables); running idempotent upgrade"
     )
 
 subprocess.run(["alembic", "upgrade", "head"], check=True)

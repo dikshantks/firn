@@ -23,7 +23,7 @@ from app.services.health_cache import health_cache, CachedTableHealth
 from app.services.job_service import job_service, JobStatus
 
 router = APIRouter()
-_health_scan_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="health-scan")
+_health_scan_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="health-scan")
 
 
 class ScanMode(str, Enum):
@@ -93,6 +93,17 @@ class CacheInfoResponse(BaseModel):
     has_cache: bool
 
 
+class ActiveHealthScanResponse(BaseModel):
+    """Most recent active health-scan job for a catalog."""
+
+    job_id: str
+    mode: Literal["light", "full"]
+    status: str
+    progress: int
+    message: str
+    started_at: str
+
+
 @router.get("/cache/info", response_model=CacheInfoResponse)
 async def get_cache_info(
     catalog: str = Query(..., description="Catalog name"),
@@ -120,6 +131,33 @@ async def clear_cache(
         "deleted_tables": deleted,
         "message": f"Cleared {deleted} cached table health records",
     }
+
+
+@router.get("/scan/active", response_model=ActiveHealthScanResponse | None)
+async def get_active_health_scan(
+    catalog: str = Query(..., description="Catalog name"),
+) -> ActiveHealthScanResponse | None:
+    """Return the latest active health scan job for a catalog, if one exists."""
+    job = job_service.find_latest_job(
+        job_type="health_scan",
+        catalog=catalog,
+        statuses=[JobStatus.PENDING, JobStatus.RUNNING],
+    )
+    if not job:
+        return None
+
+    mode = (job.payload or {}).get("mode", "light")
+    if mode not in {"light", "full"}:
+        mode = "light"
+
+    return ActiveHealthScanResponse(
+        job_id=job.id,
+        mode=mode,
+        status=job.status.value,
+        progress=job.progress,
+        message=job.message,
+        started_at=job.created_at.isoformat(),
+    )
 
 
 @router.get("/summary/stream")
@@ -399,6 +437,75 @@ async def scan_tables_health(
         )
 
 
+@router.post("/tables/{namespace}/{table}/scan", status_code=status.HTTP_202_ACCEPTED)
+async def scan_table_health(
+    namespace: str,
+    table: str,
+    catalog: str = Query(..., description="Catalog name"),
+    mode: Literal["light", "full"] = Query(
+        "light",
+        description="Scan mode: light (metadata only) or full (with S3 manifest reads)",
+    ),
+) -> dict:
+    """
+    Scan one table in the background and cache the result.
+
+    Use this for per-table refresh without re-scanning the entire catalog.
+    Track progress via GET /api/jobs/{job_id}.
+    """
+    pyiceberg_catalog = catalog_service.get_catalog(catalog)
+    if not pyiceberg_catalog:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Catalog '{catalog}' not found",
+        )
+
+    job = job_service.create_job(
+        initial_message=f"Starting {mode} health scan for {namespace}.{table}...",
+        job_type="health_scan_table",
+        payload={"mode": mode, "namespace": namespace, "table": table},
+        catalog=catalog,
+    )
+
+    def scan_single_table(job_id: str):
+        health_service = HealthService(pyiceberg_catalog)
+        job_service.update_job(
+            job_id,
+            progress=10,
+            message=f"Analyzing {namespace}.{table}...",
+        )
+        result = health_service.analyze_table_health(
+            namespace,
+            table,
+            catalog,
+            mode=mode,
+        )
+        health_cache.save_table_health(result, scan_mode=mode)
+        job_service.update_job(
+            job_id,
+            progress=100,
+            message=f"Health scan complete for {namespace}.{table}",
+        )
+        return {
+            "namespace": namespace,
+            "table": table,
+            "status": result.status.value,
+            "health_score": result.health_score,
+            "scan_mode": mode,
+            "cached": True,
+        }
+
+    job_service.run_in_background(job.id, scan_single_table)
+
+    return {
+        "job_id": job.id,
+        "mode": mode,
+        "namespace": namespace,
+        "table": table,
+        "message": f"{mode.capitalize()} health scan started for {namespace}.{table}.",
+    }
+
+
 @router.get("/tables/{namespace}/{table}", response_model=TableHealth)
 async def get_table_health(
     namespace: str,
@@ -661,7 +768,24 @@ async def trigger_health_scan(
             detail=f"Catalog '{catalog}' not found",
         )
     
-    job = job_service.create_job(initial_message=f"Starting {mode} health scan...")
+    existing_job = job_service.find_latest_job(
+        job_type="health_scan",
+        catalog=catalog,
+        statuses=[JobStatus.PENDING, JobStatus.RUNNING],
+    )
+    if existing_job:
+        return {
+            "job_id": existing_job.id,
+            "mode": (existing_job.payload or {}).get("mode", mode),
+            "message": "A health scan is already running for this catalog.",
+        }
+
+    job = job_service.create_job(
+        initial_message=f"Starting {mode} health scan...",
+        job_type="health_scan",
+        payload={"mode": mode},
+        catalog=catalog,
+    )
     
     thresholds = HealthThresholds(
         snapshot_warning_threshold=snapshot_warning_threshold,
@@ -724,7 +848,12 @@ async def get_health_summary_async(
             detail=f"Catalog '{catalog}' not found",
         )
     
-    job = job_service.create_job(initial_message=f"Starting {mode} health scan...")
+    job = job_service.create_job(
+        initial_message=f"Starting {mode} health scan...",
+        job_type="health_scan",
+        payload={"mode": mode},
+        catalog=catalog,
+    )
     
     thresholds = HealthThresholds(
         snapshot_warning_threshold=snapshot_warning_threshold,
@@ -782,7 +911,12 @@ async def scan_tables_health_async(
             detail=f"Catalog '{catalog}' not found",
         )
     
-    job = job_service.create_job(initial_message=f"Starting {mode} table health scan...")
+    job = job_service.create_job(
+        initial_message=f"Starting {mode} table health scan...",
+        job_type="health_scan_tables",
+        payload={"mode": mode, "min_snapshots": min_snapshots},
+        catalog=catalog,
+    )
     
     def scan_with_progress(job_id: str):
         health_service = HealthService(pyiceberg_catalog)

@@ -17,16 +17,13 @@ import {
   FileStack,
   Files,
   Play,
-  Square,
-  Activity,
 } from 'lucide-react';
 import { 
   useHealthSummary, 
   useHealthCacheInfo, 
   useTriggerHealthScan,
-  useHealthSummaryStream,
+  useActiveHealthScan,
 } from '../../hooks/useHealth';
-import { useJobProgress } from '../../hooks/useJob';
 import { JobProgress } from '../Common/JobProgress';
 import type { HealthThresholds, ScanMode } from '../../services/api';
 
@@ -50,13 +47,13 @@ const DEFAULT_THRESHOLDS: HealthThresholds = {
   small_manifest_warning_threshold: 20,
 };
 
+const getActiveScanStorageKey = (catalogName: string) => `fern:health-scan:${catalogName}`;
+
 export function CatalogHealthDashboard({ catalogName, onBack, onViewTables }: CatalogHealthDashboardProps) {
   const [showConfig, setShowConfig] = useState(false);
   const [thresholds, setThresholds] = useState<HealthThresholds>(DEFAULT_THRESHOLDS);
   const [scanMode, setScanMode] = useState<ScanMode>('cached');
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
-  const [useStreaming, setUseStreaming] = useState(false);
-  const [streamingMode, setStreamingMode] = useState<'light' | 'full'>('light');
   const autoScanStartedRef = useRef(false);
   
   const { data: summary, isLoading, error, refetch } = useHealthSummary(catalogName, {
@@ -66,29 +63,30 @@ export function CatalogHealthDashboard({ catalogName, onBack, onViewTables }: Ca
   
   const { data: cacheInfo, isLoading: isCacheLoading, refetch: refetchCacheInfo } =
     useHealthCacheInfo(catalogName);
+  const { data: activeScan, refetch: refetchActiveScan } = useActiveHealthScan(catalogName);
   const triggerScan = useTriggerHealthScan();
-  useJobProgress(activeJobId);
-  
-  // Streaming hook
-  const streaming = useHealthSummaryStream(catalogName, {
-    mode: streamingMode,
-    thresholds,
-  });
 
-  const handleStartStreaming = (mode: 'light' | 'full') => {
-    setStreamingMode(mode);
-    setUseStreaming(true);
-    streaming.reset();
-    setTimeout(() => streaming.start(), 0);
-  };
+  useEffect(() => {
+    const storedJobId = window.localStorage.getItem(getActiveScanStorageKey(catalogName));
+    if (storedJobId) {
+      setActiveJobId(storedJobId);
+    }
+  }, [catalogName]);
+
+  useEffect(() => {
+    if (activeScan?.job_id && activeScan.status !== 'completed' && activeScan.status !== 'failed') {
+      setActiveJobId(activeScan.job_id);
+      window.localStorage.setItem(getActiveScanStorageKey(catalogName), activeScan.job_id);
+    }
+  }, [activeScan, catalogName]);
 
   // Auto-start a light scan when no cached health data exists.
   useEffect(() => {
     if (
       autoScanStartedRef.current ||
       isCacheLoading ||
-      streaming.isStreaming ||
-      useStreaming
+      activeJobId ||
+      (activeScan && activeScan.status !== 'completed' && activeScan.status !== 'failed')
     ) {
       return;
     }
@@ -98,38 +96,19 @@ export function CatalogHealthDashboard({ catalogName, onBack, onViewTables }: Ca
 
     if (noCachedData || summaryUnavailable) {
       autoScanStartedRef.current = true;
-      handleStartStreaming('light');
+      void handleTriggerScan('light');
     }
   }, [
     isCacheLoading,
     cacheInfo?.has_cache,
     error,
     summary,
-    streaming.isStreaming,
-    useStreaming,
+    activeJobId,
+    activeScan,
   ]);
 
-  const handleStopStreaming = () => {
-    streaming.stop();
-    setUseStreaming(false);
-  };
-
-  const handleStreamingComplete = () => {
-    setUseStreaming(false);
-    refetch();
-    refetchCacheInfo();
-  };
-
-  // When streaming completes, refresh data
-  useEffect(() => {
-    if (streaming.isComplete && useStreaming) {
-      handleStreamingComplete();
-    }
-  }, [streaming.isComplete, useStreaming]);
-
-  // Background job-based scan (fallback, kept for future use)
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  const _handleTriggerScan = async (mode: 'light' | 'full') => {
+  // Background job-based scan
+  const handleTriggerScan = async (mode: 'light' | 'full') => {
     try {
       const result = await triggerScan.mutateAsync({
         catalog: catalogName,
@@ -137,6 +116,8 @@ export function CatalogHealthDashboard({ catalogName, onBack, onViewTables }: Ca
         thresholds,
       });
       setActiveJobId(result.job_id);
+      window.localStorage.setItem(getActiveScanStorageKey(catalogName), result.job_id);
+      await refetchActiveScan();
     } catch (err) {
       console.error('Failed to trigger scan:', err);
     }
@@ -144,8 +125,11 @@ export function CatalogHealthDashboard({ catalogName, onBack, onViewTables }: Ca
 
   const handleJobComplete = () => {
     setActiveJobId(null);
+    window.localStorage.removeItem(getActiveScanStorageKey(catalogName));
     refetch();
     refetchCacheInfo();
+    refetchActiveScan();
+    setScanMode('cached');
   };
 
   const handleThresholdChange = (key: keyof HealthThresholds, value: string) => {
@@ -160,8 +144,7 @@ export function CatalogHealthDashboard({ catalogName, onBack, onViewTables }: Ca
     setThresholds(DEFAULT_THRESHOLDS);
   };
 
-  // Show streaming UI when actively streaming
-  if (streaming.isStreaming || (useStreaming && !streaming.isComplete)) {
+  if (activeJobId) {
     return (
       <div className="p-6 max-w-5xl mx-auto">
         {onBack && (
@@ -186,146 +169,24 @@ export function CatalogHealthDashboard({ catalogName, onBack, onViewTables }: Ca
               <p className="text-sm text-gray-500">{catalogName}</p>
             </div>
           </div>
-          <button
-            onClick={handleStopStreaming}
-            className="flex items-center gap-2 px-3 py-2 text-sm bg-red-100 dark:bg-red-900/30 text-red-700 dark:text-red-400 rounded-lg hover:bg-red-200 dark:hover:bg-red-900/50"
-          >
-            <Square className="w-4 h-4" />
-            Stop Scan
-          </button>
         </div>
 
-        {/* Streaming Progress */}
         <div className="mb-6 bg-gray-50 dark:bg-gray-800/50 rounded-lg p-4 border border-gray-200 dark:border-gray-700">
-          <div className="flex items-center justify-between mb-3">
-            <div className="flex items-center gap-2">
-              <Activity className="w-5 h-5 text-iceberg animate-pulse" />
-              <span className="font-medium text-gray-900 dark:text-white">
-                {streamingMode === 'light' ? 'Light Scan' : 'Full Scan'} in Progress
-              </span>
-            </div>
-            <span className="text-sm font-semibold text-iceberg">
-              {streaming.progressPercent}%
-            </span>
-          </div>
-          
-          {/* Progress Bar */}
-          <div className="w-full bg-gray-200 dark:bg-gray-700 rounded-full h-3 mb-3 overflow-hidden">
-            <div
-              className="h-3 rounded-full bg-iceberg transition-all duration-300"
-              style={{ width: `${streaming.progressPercent}%` }}
-            />
-          </div>
-          
-          {/* Progress Details */}
-          {streaming.progress && (
-            <div className="flex flex-wrap gap-4 text-sm text-gray-600 dark:text-gray-400">
-              <span>
-                Namespaces: {streaming.namespaces.length} / {streaming.progress.namespacesTotal.toLocaleString()}
-              </span>
-              <span>
-                Tables: {streaming.runningTotals.tablesScanned.toLocaleString()} / {streaming.progress.tablesTotal.toLocaleString()}
-              </span>
-            </div>
-          )}
-          
-          {/* Current Namespace */}
-          {streaming.namespaces.length > 0 && (
-            <p className="text-sm text-gray-500 dark:text-gray-400 mt-2">
-              Last completed: <span className="font-medium">{streaming.namespaces[streaming.namespaces.length - 1].namespace}</span>
-            </p>
-          )}
+          <p className="text-sm text-gray-600 dark:text-gray-400 mb-4">
+            This scan runs in the background. You can leave this page and come back later; the dashboard will reconnect to the same job instead of starting a new scan.
+          </p>
+          <JobProgress
+            jobId={activeJobId}
+            onComplete={handleJobComplete}
+            onError={() => handleJobComplete()}
+          />
         </div>
-
-        {/* Live Running Totals */}
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
-          <div className="bg-white dark:bg-gray-800 rounded-lg p-4 border border-gray-200 dark:border-gray-700 shadow-sm">
-            <div className="flex items-center justify-between mb-2">
-              <span className="text-sm text-gray-500 dark:text-gray-400">Scanned</span>
-              <Database className="w-5 h-5 text-gray-400" />
-            </div>
-            <p className="text-2xl font-bold text-gray-900 dark:text-white">
-              {streaming.runningTotals.tablesScanned.toLocaleString()}
-            </p>
-          </div>
-
-          <div className="bg-green-50 dark:bg-green-900/20 rounded-lg p-4 border border-green-200 dark:border-green-800">
-            <div className="flex items-center justify-between mb-2">
-              <span className="text-sm text-green-600 dark:text-green-400">Healthy</span>
-              <CheckCircle className="w-5 h-5 text-green-500" />
-            </div>
-            <p className="text-2xl font-bold text-green-700 dark:text-green-300">
-              {streaming.runningTotals.healthy.toLocaleString()}
-            </p>
-          </div>
-
-          <div className="bg-yellow-50 dark:bg-yellow-900/20 rounded-lg p-4 border border-yellow-200 dark:border-yellow-800">
-            <div className="flex items-center justify-between mb-2">
-              <span className="text-sm text-yellow-600 dark:text-yellow-400">Warning</span>
-              <AlertTriangle className="w-5 h-5 text-yellow-500" />
-            </div>
-            <p className="text-2xl font-bold text-yellow-700 dark:text-yellow-300">
-              {streaming.runningTotals.warning.toLocaleString()}
-            </p>
-          </div>
-
-          <div className="bg-red-50 dark:bg-red-900/20 rounded-lg p-4 border border-red-200 dark:border-red-800">
-            <div className="flex items-center justify-between mb-2">
-              <span className="text-sm text-red-600 dark:text-red-400">Critical</span>
-              <XCircle className="w-5 h-5 text-red-500" />
-            </div>
-            <p className="text-2xl font-bold text-red-700 dark:text-red-300">
-              {streaming.runningTotals.critical.toLocaleString()}
-            </p>
-          </div>
-        </div>
-
-        {/* Recent Namespaces */}
-        {streaming.namespaces.length > 0 && (
-          <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 shadow-sm overflow-hidden">
-            <div className="px-4 py-3 border-b border-gray-200 dark:border-gray-700">
-              <h3 className="font-semibold text-gray-900 dark:text-white">
-                Recently Scanned Namespaces
-              </h3>
-            </div>
-            <div className="max-h-64 overflow-y-auto">
-              {streaming.namespaces.slice(-10).reverse().map((ns) => (
-                <div
-                  key={ns.namespace}
-                  className="flex items-center justify-between px-4 py-2 border-b border-gray-100 dark:border-gray-700 last:border-b-0"
-                >
-                  <div className="flex items-center gap-2">
-                    <span className="text-sm font-medium text-gray-900 dark:text-white">
-                      {ns.namespace}
-                    </span>
-                    <span className="text-xs text-gray-500">
-                      ({ns.tablesScanned} tables)
-                    </span>
-                  </div>
-                  <div className="flex items-center gap-3 text-xs">
-                    <span className="text-green-600">{ns.healthy} healthy</span>
-                    <span className="text-yellow-600">{ns.warning} warning</span>
-                    <span className="text-red-600">{ns.critical} critical</span>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-
-        {streaming.error && (
-          <div className="mt-4 p-4 bg-red-50 dark:bg-red-900/20 rounded-lg border border-red-200 dark:border-red-800">
-            <p className="text-sm text-red-700 dark:text-red-400">
-              Error: {streaming.error}
-            </p>
-          </div>
-        )}
       </div>
     );
   }
 
   // Show loading while cache info is fetched or auto-scan is starting.
-  if ((isCacheLoading || (cacheInfo?.has_cache === false && !streaming.isStreaming && !useStreaming)) && !summary) {
+  if ((isCacheLoading || (cacheInfo?.has_cache === false && !activeJobId)) && !summary) {
     return (
       <div className="flex flex-col items-center justify-center h-full p-8">
         <Loader2 className="w-12 h-12 animate-spin text-iceberg mb-4" />
@@ -335,7 +196,7 @@ export function CatalogHealthDashboard({ catalogName, onBack, onViewTables }: Ca
   }
 
   // Show error state with manual scan options if auto-scan did not start.
-  if (error && !summary && !streaming.isStreaming && !useStreaming) {
+  if (error && !summary && !activeJobId) {
     const isNoCache = cacheInfo?.has_cache === false;
     
     return (
@@ -364,14 +225,14 @@ export function CatalogHealthDashboard({ catalogName, onBack, onViewTables }: Ca
           
           <div className="flex flex-col sm:flex-row gap-3">
             <button
-              onClick={() => handleStartStreaming('light')}
+              onClick={() => void handleTriggerScan('light')}
               className="flex items-center justify-center gap-2 px-4 py-2 bg-iceberg text-white rounded-lg hover:bg-iceberg/90 transition-colors"
             >
               <Play className="w-4 h-4" />
               Start Light Scan (Streaming)
             </button>
             <button
-              onClick={() => handleStartStreaming('full')}
+              onClick={() => void handleTriggerScan('full')}
               className="flex items-center justify-center gap-2 px-4 py-2 bg-orange-500 text-white rounded-lg hover:bg-orange-600 transition-colors"
             >
               <HardDrive className="w-4 h-4" />
@@ -481,16 +342,16 @@ export function CatalogHealthDashboard({ catalogName, onBack, onViewTables }: Ca
               Refresh
             </button>
             <button
-              onClick={() => handleStartStreaming('light')}
-              disabled={streaming.isStreaming || !!activeJobId}
+              onClick={() => void handleTriggerScan('light')}
+              disabled={!!activeJobId}
               className="px-3 py-1.5 text-sm bg-iceberg/10 text-iceberg hover:bg-iceberg/20 rounded-lg transition-colors flex items-center gap-1.5 disabled:opacity-50"
             >
               <Zap className="w-4 h-4" />
               Light Scan
             </button>
             <button
-              onClick={() => handleStartStreaming('full')}
-              disabled={streaming.isStreaming || !!activeJobId}
+              onClick={() => void handleTriggerScan('full')}
+              disabled={!!activeJobId}
               className="px-3 py-1.5 text-sm bg-orange-100 dark:bg-orange-900/30 text-orange-700 dark:text-orange-400 hover:bg-orange-200 dark:hover:bg-orange-900/50 rounded-lg transition-colors flex items-center gap-1.5 disabled:opacity-50"
             >
               <HardDrive className="w-4 h-4" />

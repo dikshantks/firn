@@ -27,10 +27,13 @@ class Job:
     """Represents a background job with progress tracking."""
     id: str
     status: JobStatus
+    type: str = "generic"
     progress: int = 0
     message: str = ""
     result: Any = None
     error: Optional[str] = None
+    payload: Optional[dict[str, Any]] = None
+    catalog: Optional[str] = None
     created_at: datetime = field(default_factory=datetime.utcnow)
     updated_at: datetime = field(default_factory=datetime.utcnow)
 
@@ -63,15 +66,25 @@ class JobService:
         return Job(
             id=record.id,
             status=JobStatus(record.status),
+            type=record.type,
             progress=record.progress,
             message=record.message or "",
             result=record.result_json,
             error=record.error,
+            payload=record.payload_json,
+            catalog=record.catalog,
             created_at=record.created_at,
             updated_at=record.updated_at,
         )
     
-    def create_job(self, initial_message: str = "") -> Job:
+    def create_job(
+        self,
+        initial_message: str = "",
+        *,
+        job_type: str = "generic",
+        payload: Optional[dict[str, Any]] = None,
+        catalog: Optional[str] = None,
+    ) -> Job:
         """
         Create a new job and return it.
         
@@ -85,17 +98,22 @@ class JobService:
         job = Job(
             id=job_id,
             status=JobStatus.PENDING,
-            message=initial_message or "Job created, waiting to start..."
+            type=job_type,
+            message=initial_message or "Job created, waiting to start...",
+            payload=payload,
+            catalog=catalog,
         )
         if self.use_database:
             with session_scope() as session:
                 session.add(
                     JobRecord(
                         id=job.id,
-                        type="generic",
+                        type=job.type,
                         status=job.status.value,
                         progress=job.progress,
                         message=job.message,
+                        payload_json=job.payload,
+                        catalog=job.catalog,
                         created_at=job.created_at,
                         updated_at=job.updated_at,
                     )
@@ -208,6 +226,43 @@ class JobService:
         jobs = list(self._jobs.values())
         jobs.sort(key=lambda j: j.created_at, reverse=True)
         return jobs[:limit]
+
+    def find_latest_job(
+        self,
+        *,
+        job_type: Optional[str] = None,
+        catalog: Optional[str] = None,
+        statuses: Optional[list[JobStatus]] = None,
+    ) -> Optional[Job]:
+        """Return the most recently created job matching filters."""
+        allowed_statuses = {status.value for status in statuses} if statuses else None
+
+        if self.use_database:
+            with session_scope() as session:
+                query = select(JobRecord)
+                if job_type:
+                    query = query.where(JobRecord.type == job_type)
+                if catalog:
+                    query = query.where(JobRecord.catalog == catalog)
+                if allowed_statuses:
+                    query = query.where(JobRecord.status.in_(allowed_statuses))
+                query = query.order_by(JobRecord.created_at.desc()).limit(1)
+                record = session.execute(query).scalar_one_or_none()
+                if not record:
+                    return None
+                return self._record_to_job(record)
+
+        jobs = list(self._jobs.values())
+        if job_type:
+            jobs = [job for job in jobs if job.type == job_type]
+        if catalog:
+            jobs = [job for job in jobs if job.catalog == catalog]
+        if allowed_statuses:
+            jobs = [job for job in jobs if job.status.value in allowed_statuses]
+        if not jobs:
+            return None
+        jobs.sort(key=lambda job: job.created_at, reverse=True)
+        return jobs[0]
     
     def run_in_background(
         self,

@@ -10,6 +10,8 @@ from typing import Sequence, Union
 from alembic import op
 import sqlalchemy as sa
 
+from app.db.alembic_mysql import create_index_if_not_exists, drop_index_if_exists
+
 revision: str = "0001_create_control_plane_tables"
 down_revision: Union[str, None] = None
 branch_labels: Union[str, Sequence[str], None] = None
@@ -84,17 +86,15 @@ def upgrade() -> None:
         mysql_engine="InnoDB",
         if_not_exists=True,
     )
-    op.create_index(
+    create_index_if_not_exists(
         "idx_table_health_catalog_status",
         "table_health",
         ["catalog", "status"],
-        if_not_exists=True,
     )
-    op.create_index(
+    create_index_if_not_exists(
         "idx_table_health_catalog_scanned",
         "table_health",
         ["catalog", "scanned_at"],
-        if_not_exists=True,
     )
     op.create_table(
         "jobs",
@@ -121,26 +121,24 @@ def upgrade() -> None:
         mysql_engine="InnoDB",
         if_not_exists=True,
     )
-    op.create_index(
+    create_index_if_not_exists(
         "idx_jobs_status_heartbeat",
         "jobs",
         ["status", "heartbeat_at"],
-        if_not_exists=True,
     )
-    op.create_index(
+    create_index_if_not_exists(
         "idx_jobs_catalog_created",
         "jobs",
         ["catalog", "created_at"],
-        if_not_exists=True,
     )
 
 
 def downgrade() -> None:
-    op.drop_index("idx_jobs_catalog_created", table_name="jobs")
-    op.drop_index("idx_jobs_status_heartbeat", table_name="jobs")
+    drop_index_if_exists("idx_jobs_catalog_created", "jobs")
+    drop_index_if_exists("idx_jobs_status_heartbeat", "jobs")
     op.drop_table("jobs")
-    op.drop_index("idx_table_health_catalog_scanned", table_name="table_health")
-    op.drop_index("idx_table_health_catalog_status", table_name="table_health")
+    drop_index_if_exists("idx_table_health_catalog_scanned", "table_health")
+    drop_index_if_exists("idx_table_health_catalog_status", "table_health")
     op.drop_table("table_health")
     op.drop_table("catalog_summary")
     op.drop_table("catalog_registry")

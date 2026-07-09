@@ -17,9 +17,12 @@ router = APIRouter()
 class JobResponse(BaseModel):
     """Response model for job status."""
     id: str
+    type: str
     status: str
     progress: int
     message: str
+    catalog: str | None = None
+    payload: Any = None
     result: Any = None
     error: str | None = None
 
@@ -32,21 +35,25 @@ class JobCreatedResponse(BaseModel):
     message: str = "Job created successfully"
 
 
+def _to_job_response(job) -> JobResponse:
+    return JobResponse(
+        id=job.id,
+        type=job.type,
+        status=job.status.value,
+        progress=job.progress,
+        message=job.message,
+        catalog=job.catalog,
+        payload=job.payload,
+        result=job.result,
+        error=job.error,
+    )
+
+
 @router.get("", response_model=list[JobResponse])
 async def list_jobs(limit: int = 100) -> list[JobResponse]:
     """List all recent jobs."""
     jobs = job_service.list_jobs(limit=limit)
-    return [
-        JobResponse(
-            id=job.id,
-            status=job.status.value,
-            progress=job.progress,
-            message=job.message,
-            result=job.result,
-            error=job.error,
-        )
-        for job in jobs
-    ]
+    return [_to_job_response(job) for job in jobs]
 
 
 @router.get("/{job_id}", response_model=JobResponse)
@@ -59,14 +66,7 @@ async def get_job(job_id: str) -> JobResponse:
             detail=f"Job '{job_id}' not found"
         )
     
-    return JobResponse(
-        id=job.id,
-        status=job.status.value,
-        progress=job.progress,
-        message=job.message,
-        result=job.result,
-        error=job.error,
-    )
+    return _to_job_response(job)
 
 
 @router.get("/{job_id}/stream")

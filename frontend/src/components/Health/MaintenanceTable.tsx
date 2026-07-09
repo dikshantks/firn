@@ -11,8 +11,9 @@ import {
   Loader2,
   Download,
   Filter,
+  RefreshCw,
 } from 'lucide-react';
-import { useCachedTables } from '../../hooks/useHealth';
+import { useCachedTables, useScanTableHealth } from '../../hooks/useHealth';
 import type { CachedTableHealth } from '../../services/api';
 
 interface MaintenanceTableProps {
@@ -38,8 +39,15 @@ export function MaintenanceTable({ catalogName, filter, onBack }: MaintenanceTab
   const [sortField, setSortField] = useState<SortField>('health_score');
   const [sortOrder, setSortOrder] = useState<SortOrder>('asc');
   const [copiedCommand, setCopiedCommand] = useState<string | null>(null);
+  const [confirmModal, setConfirmModal] = useState<{
+    table: CachedTableHealth;
+    type: 'expire' | 'compact' | 'rewrite';
+    command: string;
+  } | null>(null);
+  const [confirmInput, setConfirmInput] = useState('');
+  const [scanningTableKey, setScanningTableKey] = useState<string | null>(null);
 
-  const { data: tables, isLoading, error } = useCachedTables(catalogName, {
+  const { data: tables, isLoading, error, refetch } = useCachedTables(catalogName, {
     status_filter: statusFilter,
     min_snapshots: minSnapshots,
     min_delete_files: minDeleteFiles,
@@ -47,6 +55,26 @@ export function MaintenanceTable({ catalogName, filter, onBack }: MaintenanceTab
     limit: PAGE_SIZE,
     offset: page * PAGE_SIZE,
   });
+
+  const scanTableHealth = useScanTableHealth();
+
+  const handleScanTable = async (table: CachedTableHealth, mode: 'light' | 'full' = 'light') => {
+    const tableKey = `${table.namespace}.${table.table_name}`;
+    setScanningTableKey(tableKey);
+    try {
+      await scanTableHealth.mutateAsync({
+        catalog: catalogName,
+        namespace: table.namespace,
+        table: table.table_name,
+        mode,
+      });
+      await refetch();
+    } catch (scanError) {
+      console.error('Failed to scan table health:', scanError);
+    } finally {
+      setScanningTableKey(null);
+    }
+  };
 
   const handleSort = (field: SortField) => {
     if (sortField === field) {
@@ -63,26 +91,31 @@ export function MaintenanceTable({ catalogName, filter, onBack }: MaintenanceTab
     return sortOrder === 'asc' ? aVal - bVal : bVal - aVal;
   }) : [];
 
-  const copyCommand = (table: CachedTableHealth, type: 'expire' | 'compact' | 'rewrite') => {
-    let command = '';
+  const buildCommand = (table: CachedTableHealth, type: 'expire' | 'compact' | 'rewrite'): string => {
     const fullTableName = `${table.namespace}.${table.table_name}`;
-    
     switch (type) {
       case 'expire':
-        command = `CALL ${catalogName}.system.expire_snapshots('${fullTableName}', TIMESTAMP '${new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0]} 00:00:00')`;
-        break;
+        return `CALL ${catalogName}.system.expire_snapshots('${fullTableName}', TIMESTAMP '${new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0]} 00:00:00')`;
       case 'compact':
-        command = `CALL ${catalogName}.system.rewrite_data_files(table => '${fullTableName}', options => map('target-file-size-bytes', '536870912'))`;
-        break;
+        return `CALL ${catalogName}.system.rewrite_data_files(table => '${fullTableName}', options => map('target-file-size-bytes', '536870912'))`;
       case 'rewrite':
-        command = `CALL ${catalogName}.system.rewrite_manifests('${fullTableName}')`;
-        break;
+        return `CALL ${catalogName}.system.rewrite_manifests('${fullTableName}')`;
     }
-    
-    navigator.clipboard.writeText(command);
-    setCopiedCommand(`${table.table_name}-${type}`);
-    setTimeout(() => setCopiedCommand(null), 2000);
   };
+
+  const openConfirmModal = (table: CachedTableHealth, type: 'expire' | 'compact' | 'rewrite') => {
+    setConfirmInput('');
+    setConfirmModal({ table, type, command: buildCommand(table, type) });
+  };
+
+  const handleConfirmCopy = () => {
+    if (!confirmModal) return;
+    navigator.clipboard.writeText(confirmModal.command);
+    setCopiedCommand(`${confirmModal.table.table_name}-${confirmModal.type}`);
+    setTimeout(() => setCopiedCommand(null), 2000);
+    setConfirmModal(null);
+  };
+
 
   const exportCsv = () => {
     if (!tables || tables.length === 0) return;
@@ -161,6 +194,59 @@ export function MaintenanceTable({ catalogName, filter, onBack }: MaintenanceTab
 
   return (
     <div className="p-6">
+      {/* Confirmation Modal */}
+      {confirmModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+          <div className="bg-white dark:bg-gray-800 rounded-xl shadow-2xl border border-gray-200 dark:border-gray-700 w-full max-w-lg mx-4">
+            <div className="flex items-center gap-3 px-6 py-4 border-b border-gray-200 dark:border-gray-700">
+              <AlertTriangle className="w-5 h-5 text-yellow-500 shrink-0" />
+              <h3 className="text-base font-semibold text-gray-900 dark:text-white">Confirm Maintenance Command</h3>
+            </div>
+            <div className="px-6 py-4 space-y-4">
+              <p className="text-sm text-gray-600 dark:text-gray-400">
+                This command will permanently alter table{' '}
+                <span className="font-mono font-semibold text-gray-900 dark:text-white">
+                  {confirmModal.table.namespace}.{confirmModal.table.table_name}
+                </span>.
+                Type the table name below to copy the command.
+              </p>
+              <div className="bg-gray-50 dark:bg-gray-900 rounded-lg p-3 border border-gray-200 dark:border-gray-700">
+                <p className="text-xs font-mono text-gray-700 dark:text-gray-300 break-all">{confirmModal.command}</p>
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">
+                  Type <span className="font-mono font-semibold text-gray-800 dark:text-gray-200">{confirmModal.table.table_name}</span> to confirm
+                </label>
+                <input
+                  type="text"
+                  autoFocus
+                  value={confirmInput}
+                  onChange={(e) => setConfirmInput(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === 'Enter' && confirmInput === confirmModal.table.table_name) handleConfirmCopy(); }}
+                  placeholder={confirmModal.table.table_name}
+                  className="w-full px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 dark:text-white focus:outline-none focus:ring-2 focus:ring-yellow-400"
+                />
+              </div>
+            </div>
+            <div className="flex items-center justify-end gap-3 px-6 py-4 border-t border-gray-200 dark:border-gray-700">
+              <button
+                onClick={() => setConfirmModal(null)}
+                className="px-4 py-2 text-sm text-gray-600 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-200 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleConfirmCopy}
+                disabled={confirmInput !== confirmModal.table.table_name}
+                className="flex items-center gap-2 px-4 py-2 text-sm bg-yellow-500 hover:bg-yellow-600 disabled:bg-gray-300 dark:disabled:bg-gray-700 disabled:cursor-not-allowed text-white rounded-lg font-medium transition-colors"
+              >
+                <Copy className="w-4 h-4" />
+                Copy & Confirm
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       {onBack && (
         <button
           onClick={onBack}
@@ -347,17 +433,31 @@ export function MaintenanceTable({ catalogName, filter, onBack }: MaintenanceTab
                     </td>
                     <td className="px-4 py-3">
                       <div className="flex items-center gap-1">
+                        <button
+                          type="button"
+                          onClick={() => void handleScanTable(table, 'light')}
+                          disabled={scanningTableKey === `${table.namespace}.${table.table_name}`}
+                          title="Re-scan this table (light)"
+                          className="px-2 py-1 text-xs bg-iceberg/10 text-iceberg rounded hover:bg-iceberg/20 flex items-center gap-1 disabled:opacity-50"
+                        >
+                          {scanningTableKey === `${table.namespace}.${table.table_name}` ? (
+                            <Loader2 className="w-3 h-3 animate-spin" />
+                          ) : (
+                            <RefreshCw className="w-3 h-3" />
+                          )}
+                          Scan
+                        </button>
                         {table.total_snapshots > 50 && (
                           <ActionButton
                             label="Expire"
-                            onClick={() => copyCommand(table, 'expire')}
+                            onClick={() => openConfirmModal(table, 'expire')}
                             copied={copiedCommand === `${table.table_name}-expire`}
                           />
                         )}
                         {table.small_files_count > 0 && (
                           <ActionButton
                             label="Compact"
-                            onClick={() => copyCommand(table, 'compact')}
+                            onClick={() => openConfirmModal(table, 'compact')}
                             copied={copiedCommand === `${table.table_name}-compact`}
                           />
                         )}
@@ -408,7 +508,7 @@ interface SortableHeaderProps {
   onSort: (field: SortField) => void;
 }
 
-function SortableHeader({ label, field, currentField, currentOrder, onSort }: SortableHeaderProps) {
+function SortableHeader({ label, field, currentField, currentOrder: _currentOrder, onSort }: SortableHeaderProps) {
   const isActive = currentField === field;
   return (
     <th
