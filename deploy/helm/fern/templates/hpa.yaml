@@ -1,8 +1,9 @@
-{{- if .Values.hpa.enabled }}
+{{- if and .Values.hpa.enabled (not .Values.isCanary) }}
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
   name: fern-backend
+  namespace: {{ .Values.namespace }}
   labels:
     {{- include "fern.labels" . | nindent 4 }}
 spec:

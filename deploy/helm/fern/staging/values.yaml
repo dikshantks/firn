@@ -1,0 +1,40 @@
+environment: bbana-staging
+namespace: fern
+
+backend:
+  imageName: fern-backend
+  tag: latest
+  replicas: 2
+  irsaRoleArn: ""
+  env:
+    CORS_ORIGINS: "https://fern-staging.example.com"
+    REPLICA_ID: "fern-staging"
+    DEBUG: "false"
+    METRICS_ENABLED: "true"
+
+frontend:
+  imageName: fern-frontend
+  tag: latest
+  replicas: 2
+  env:
+    VITE_API_URL: "https://fern-staging.example.com"
+
+mcp:
+  imageName: fern-mcp
+  tag: latest
+  replicas: 1
+
+ingress:
+  enabled: true
+  host: fern-staging.example.com
+  certificateArn: ""
+
+externalSecret:
+  enabled: false
+  remoteDatabaseUrlKey: fern/staging/db
+
+serviceMonitor:
+  enabled: true
+
+prometheusRule:
+  enabled: true

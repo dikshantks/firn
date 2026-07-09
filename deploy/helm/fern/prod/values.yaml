@@ -1,0 +1,45 @@
+environment: bbana-prod
+namespace: fern
+
+backend:
+  imageName: fern-backend
+  tag: latest
+  replicas: 3
+  irsaRoleArn: ""
+  env:
+    CORS_ORIGINS: "https://fern.example.com"
+    REPLICA_ID: "fern-prod"
+    DEBUG: "false"
+    METRICS_ENABLED: "true"
+
+frontend:
+  imageName: fern-frontend
+  tag: latest
+  replicas: 3
+  env:
+    VITE_API_URL: "https://fern.example.com"
+
+mcp:
+  imageName: fern-mcp
+  tag: latest
+  replicas: 2
+
+ingress:
+  enabled: true
+  host: fern.example.com
+  certificateArn: ""
+
+externalSecret:
+  enabled: false
+  remoteDatabaseUrlKey: fern/prod/db
+
+serviceMonitor:
+  enabled: true
+
+prometheusRule:
+  enabled: true
+
+hpa:
+  enabled: true
+  minReplicas: 3
+  maxReplicas: 10

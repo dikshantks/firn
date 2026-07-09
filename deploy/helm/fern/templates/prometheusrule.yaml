@@ -3,6 +3,7 @@ apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule
 metadata:
   name: fern
+  namespace: {{ .Values.namespace }}
   labels:
     {{- include "fern.labels" . | nindent 4 }}
 spec:

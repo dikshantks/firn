@@ -1,8 +1,9 @@
-{{- if .Values.pdb.enabled }}
+{{- if and .Values.pdb.enabled (not .Values.isCanary) }}
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
   name: fern-backend
+  namespace: {{ .Values.namespace }}
   labels:
     {{- include "fern.labels" . | nindent 4 }}
 spec:

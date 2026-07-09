@@ -1,0 +1,46 @@
+environment: bbana-qa
+namespace: fern
+
+backend:
+  imageName: fern-backend
+  tag: latest
+  replicas: 1
+  irsaRoleArn: ""
+  env:
+    CORS_ORIGINS: "https://fern-qa.example.com"
+    REPLICA_ID: "fern-qa"
+    DEBUG: "false"
+    METRICS_ENABLED: "true"
+
+frontend:
+  imageName: fern-frontend
+  tag: latest
+  replicas: 1
+  env:
+    VITE_API_URL: "https://fern-qa.example.com"
+
+mcp:
+  imageName: fern-mcp
+  tag: latest
+  replicas: 1
+
+ingress:
+  enabled: true
+  host: fern-qa.example.com
+  certificateArn: ""
+
+externalSecret:
+  enabled: false
+  remoteDatabaseUrlKey: fern/qa/db
+
+serviceMonitor:
+  enabled: false
+
+prometheusRule:
+  enabled: false
+
+hpa:
+  enabled: false
+
+pdb:
+  enabled: false

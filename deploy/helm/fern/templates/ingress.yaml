@@ -1,8 +1,9 @@
-{{- if .Values.ingress.enabled }}
+{{- if and .Values.ingress.enabled (not .Values.isCanary) }}
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: fern
+  namespace: {{ .Values.namespace }}
   labels:
     {{- include "fern.labels" . | nindent 4 }}
   annotations:

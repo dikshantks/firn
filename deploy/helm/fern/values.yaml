@@ -1,8 +1,16 @@
+# Base defaults for local `helm template` / kind installs.
+# Production deploys merge env files via heva + S3 infra secrets (see deploy.sh).
+
+environment: local
+namespace: fern
+registry: ""
+isCanary: false
+
 global:
   imagePullPolicy: IfNotPresent
 
 backend:
-  image: fern/backend
+  imageName: fern-backend
   tag: latest
   replicas: 2
   serviceAccountName: fern-backend
@@ -14,6 +22,8 @@ backend:
     RELOAD: "false"
     CORS_ORIGINS: "*"
     REPLICA_ID: "fern-backend"
+    DEBUG: "false"
+    METRICS_ENABLED: "true"
   resources:
     requests:
       cpu: 250m
@@ -23,7 +33,7 @@ backend:
       memory: 1Gi
 
 frontend:
-  image: fern/frontend
+  imageName: fern-frontend
   tag: latest
   replicas: 2
   env:
@@ -38,7 +48,7 @@ frontend:
 
 mcp:
   enabled: true
-  image: fern/mcp
+  imageName: fern-mcp
   tag: latest
   replicas: 1
   env:
@@ -54,6 +64,13 @@ mcp:
     limits:
       cpu: 500m
       memory: 512Mi
+
+# Populated from S3 via deploy.sh → heva merge (see examples/values-infra-secrets.example.yaml)
+requiredInfraDependencies:
+  name: fern-infra
+  values:
+    DATABASE_URL: $DATABASE_URL
+    FERN_MCP_TOKEN: $FERN_MCP_TOKEN
 
 database:
   existingSecret: fern-db

@@ -1,7 +1,8 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: fern-migrate
+  name: fern-migrate{{ include "fern.canarySuffix" . }}
+  namespace: {{ .Values.namespace }}
   labels:
     {{- include "fern.labels" . | nindent 4 }}
   annotations:
@@ -18,14 +19,21 @@ spec:
       serviceAccountName: {{ .Values.backend.serviceAccountName }}
       containers:
         - name: migrate
-          image: "{{ .Values.backend.image }}:{{ .Values.backend.tag }}"
+          image: {{ include "fern.image" (dict "registry" .Values.registry "imageName" .Values.backend.imageName "tag" .Values.backend.tag) | quote }}
           imagePullPolicy: {{ .Values.global.imagePullPolicy }}
           command: ["sh", "scripts/migrate.sh"]
           env:
             - name: FERN_USE_DB
               value: "true"
+            {{- if not .Values.infraSettings }}
             - name: DATABASE_URL
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.database.existingSecret }}
                   key: {{ .Values.database.databaseUrlKey }}
+            {{- end }}
+          {{- if .Values.infraSettings }}
+          envFrom:
+            - secretRef:
+                name: {{ include "fern.infraSecretName" . }}
+          {{- end }}
