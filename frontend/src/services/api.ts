@@ -24,7 +24,10 @@ import type {
   OperationHistoryEntry,
 } from '../types/iceberg';
 
-const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+// Prod build: empty baseURL → same-origin /api/... or ALB ingress.
+const API_BASE_URL =
+  (import.meta as any).env?.VITE_API_URL ||
+  ((import.meta as any).env?.DEV ? 'http://localhost:8000' : '');
 
 // Create axios instance
 const apiClient: AxiosInstance = axios.create({
@@ -69,9 +72,12 @@ export const catalogApi = {
 // Job API
 export interface JobStatus {
   id: string;
+  type: string;
   status: 'pending' | 'running' | 'completed' | 'failed';
   progress: number;
   message: string;
+  catalog?: string | null;
+  payload?: Record<string, unknown> | null;
   result?: unknown;
   error?: string | null;
 }
@@ -385,6 +391,13 @@ export interface TableHealth {
     small_manifests_count: number;
     partition_count?: number | null;
     days_since_last_write?: number | null;
+    total_records: number;
+    total_position_deletes: number;
+    total_equality_deletes: number;
+    metadata_log_depth: number;
+    schema_evolution_count: number;
+    partition_spec_evolution_count: number;
+    estimated_s3_cost_monthly: number;
   };
   recommendations: Array<{
     type: string;
@@ -402,6 +415,15 @@ export interface ScanTriggerResponse {
   job_id: string;
   mode: string;
   message: string;
+}
+
+export interface ActiveHealthScan {
+  job_id: string;
+  mode: 'light' | 'full';
+  status: 'pending' | 'running' | 'completed' | 'failed';
+  progress: number;
+  message: string;
+  started_at: string;
 }
 
 export const healthApi = {
@@ -491,6 +513,20 @@ export const healthApi = {
     return response.data;
   },
 
+  scanTable: async (
+    catalog: string,
+    namespace: string,
+    table: string,
+    mode: 'light' | 'full' = 'light'
+  ): Promise<ScanTriggerResponse & { namespace: string; table: string }> => {
+    const response = await apiClient.post<ScanTriggerResponse & { namespace: string; table: string }>(
+      `/api/health/tables/${namespace}/${table}/scan`,
+      null,
+      { params: { catalog, mode } }
+    );
+    return response.data;
+  },
+
   triggerScan: async (
     catalog: string,
     mode: 'light' | 'full' = 'light',
@@ -502,6 +538,13 @@ export const healthApi = {
         mode,
         ...thresholds,
       },
+    });
+    return response.data;
+  },
+
+  getActiveScan: async (catalog: string): Promise<ActiveHealthScan | null> => {
+    const response = await apiClient.get<ActiveHealthScan | null>('/api/health/scan/active', {
+      params: { catalog },
     });
     return response.data;
   },

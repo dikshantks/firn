@@ -76,10 +76,10 @@ export function tablePath(
   catalog: string,
   namespace: string,
   table: string,
-  tab: ViewTab = 'snapshots'
+  tab: ViewTab = 'storage'
 ): string {
   const base = `/catalogs/${encodeSegment(catalog)}/${encodeSegment(namespace)}/${encodeSegment(table)}`;
-  return tab === 'snapshots' ? base : `${base}/${tab}`;
+  return tab === 'storage' ? base : `${base}/${tab}`;
 }
 
 export function tabPathFromAppTab(
@@ -93,12 +93,12 @@ export function tabPathFromAppTab(
 
 export function appTabFromPathTab(tab: string | undefined): AppViewTab {
   if (!tab) {
-    return 'snapshots';
+    return 'analytics';
   }
   if (tab in PATH_TO_TAB) {
     return PATH_TO_TAB[tab as ViewTab];
   }
-  return 'snapshots';
+  return 'analytics';
 }
 
 export function isViewTab(value: string): value is ViewTab {

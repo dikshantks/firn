@@ -1,6 +1,8 @@
 .venv/
 files/
 __pycache__/
-firn_venv/*
+fern_venv/*
 frontend/node_modules/*
+node_modules/
 .DS_Store
+.cursor/

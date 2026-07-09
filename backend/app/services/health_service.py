@@ -520,6 +520,9 @@ class HealthService:
         total_data_files = 0
         total_delete_files = 0
         total_size_bytes = 0
+        total_records = 0
+        total_position_deletes = 0
+        total_equality_deletes = 0
         
         current_snapshot = table.current_snapshot()
         if current_snapshot and current_snapshot.summary:
@@ -527,6 +530,9 @@ class HealthService:
             total_data_files = int(summary.get("total-data-files", 0))
             total_delete_files = int(summary.get("total-delete-files", 0))
             total_size_bytes = int(summary.get("total-files-size", 0))
+            total_records = int(summary.get("total-records", 0))
+            total_position_deletes = int(summary.get("total-position-deletes", 0))
+            total_equality_deletes = int(summary.get("total-equality-deletes", 0))
         
         avg_file_size_mb = (
             (total_size_bytes / total_data_files / 1024 / 1024)
@@ -543,6 +549,11 @@ class HealthService:
                 now - datetime.fromtimestamp(latest_timestamp / 1000)
             ).days
         
+        metadata_log_depth = len(table.metadata.metadata_log) if hasattr(table.metadata, "metadata_log") and table.metadata.metadata_log else 0
+        schema_evolution_count = len(table.metadata.schemas) if hasattr(table.metadata, "schemas") and table.metadata.schemas else 1
+        partition_spec_evolution_count = len(table.metadata.partition_specs) if hasattr(table.metadata, "partition_specs") and table.metadata.partition_specs else 1
+        estimated_s3_cost_monthly = total_size_gb * 0.023
+
         return TableHealthMetrics(
             total_snapshots=total_snapshots,
             oldest_snapshot_age_days=oldest_snapshot_age_days,
@@ -556,6 +567,13 @@ class HealthService:
             total_manifests=0,  # Not available without manifest scan
             small_manifests_count=0,  # Not available without manifest scan
             days_since_last_write=days_since_last_write,
+            total_records=total_records,
+            total_position_deletes=total_position_deletes,
+            total_equality_deletes=total_equality_deletes,
+            metadata_log_depth=metadata_log_depth,
+            schema_evolution_count=schema_evolution_count,
+            partition_spec_evolution_count=partition_spec_evolution_count,
+            estimated_s3_cost_monthly=estimated_s3_cost_monthly,
         )
     
     def _collect_metrics_full(self, table: Table, thresholds: Optional[HealthThresholds] = None) -> TableHealthMetrics:
@@ -619,8 +637,15 @@ class HealthService:
         
         # Get delete file count from snapshot summary as fallback
         current_snapshot = table.current_snapshot()
+        total_records = 0
+        total_position_deletes = 0
+        total_equality_deletes = 0
+
         if current_snapshot and current_snapshot.summary:
             total_delete_files = int(current_snapshot.summary.get("total-delete-files", 0))
+            total_records = int(current_snapshot.summary.get("total-records", 0))
+            total_position_deletes = int(current_snapshot.summary.get("total-position-deletes", 0))
+            total_equality_deletes = int(current_snapshot.summary.get("total-equality-deletes", 0))
         
         avg_file_size_mb = (
             (total_size_bytes / total_data_files / 1024 / 1024)
@@ -641,6 +666,11 @@ class HealthService:
                 now - datetime.fromtimestamp(latest_timestamp / 1000)
             ).days
         
+        metadata_log_depth = len(table.metadata.metadata_log) if hasattr(table.metadata, "metadata_log") and table.metadata.metadata_log else 0
+        schema_evolution_count = len(table.metadata.schemas) if hasattr(table.metadata, "schemas") and table.metadata.schemas else 1
+        partition_spec_evolution_count = len(table.metadata.partition_specs) if hasattr(table.metadata, "partition_specs") and table.metadata.partition_specs else 1
+        estimated_s3_cost_monthly = total_size_gb * 0.023
+
         return TableHealthMetrics(
             total_snapshots=total_snapshots,
             oldest_snapshot_age_days=oldest_snapshot_age_days,
@@ -654,6 +684,13 @@ class HealthService:
             total_manifests=total_manifests,
             small_manifests_count=small_manifests_count,
             days_since_last_write=days_since_last_write,
+            total_records=total_records,
+            total_position_deletes=total_position_deletes,
+            total_equality_deletes=total_equality_deletes,
+            metadata_log_depth=metadata_log_depth,
+            schema_evolution_count=schema_evolution_count,
+            partition_spec_evolution_count=partition_spec_evolution_count,
+            estimated_s3_cost_monthly=estimated_s3_cost_monthly,
         )
     
     def _collect_metrics(self, table: Table, thresholds: Optional[HealthThresholds] = None) -> TableHealthMetrics:

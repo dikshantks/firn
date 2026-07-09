@@ -71,7 +71,7 @@ export function StorageStats({ catalog, namespace, table }: StorageStatsProps) {
       </div>
 
       {/* Summary cards */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+      <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
         <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-4">
           <div className="flex items-center gap-2 text-gray-600 dark:text-gray-400 mb-2">
             <HardDrive className="w-5 h-5" />
@@ -106,6 +106,15 @@ export function StorageStats({ catalog, namespace, table }: StorageStatsProps) {
           </div>
           <p className="text-2xl font-bold text-gray-900 dark:text-white">
             {analytics.avg_file_size_human}
+          </p>
+        </div>
+        <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-4">
+          <div className="flex items-center gap-2 text-gray-600 dark:text-gray-400 mb-2">
+            <span className="text-sm font-semibold text-green-600 dark:text-green-400">$</span>
+            <span className="text-sm">Est. S3 Cost</span>
+          </div>
+          <p className="text-2xl font-bold text-gray-900 dark:text-white">
+            ${((analytics.total_size_bytes / (1024 * 1024 * 1024)) * 0.023).toFixed(2)}<span className="text-xs text-gray-500 font-normal">/mo</span>
           </p>
         </div>
       </div>

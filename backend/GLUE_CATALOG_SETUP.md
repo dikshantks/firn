@@ -24,6 +24,26 @@ Properties for accessing S3 data:
 
 ## Configuration Methods
 
+### Production: Kubernetes pod IAM role / IRSA
+
+In production on EKS, Fern should rely on the backend pod's IAM role for Glue and S3 access. Do not put static AWS keys or temporary session credentials into production catalog config.
+
+The catalog config should usually include only non-secret properties, for example:
+
+```json
+{
+  "name": "prod-glue",
+  "type": "glue",
+  "properties": {
+    "region_name": "us-east-1"
+  }
+}
+```
+
+With IRSA configured on the backend ServiceAccount, boto3/PyIceberg resolve credentials from the pod identity chain. The IAM role should grant read-only Glue permissions and scoped S3 read/list permissions for the lake buckets Fern needs to inspect.
+
+The explicit credential examples below are intended for local development, isolated testing, or short-lived debugging only.
+
 ### Method 1: Using boto3-style parameters (Recommended)
 
 The backend automatically normalizes boto3 parameter names to PyIceberg properties:

@@ -23,7 +23,7 @@ import { StorageStats } from '../components/Analytics/StorageStats';
 import { OperationTimeline } from '../components/Analytics/OperationTimeline';
 import { TableOptimizationSuggestions } from '../components/Health/TableOptimizationSuggestions';
 import { useSnapshotGraph, useTableMetadata } from '../hooks/useIcebergData';
-import { useCachedTableHealth, useScanTableHealth } from '../hooks/useHealth';
+import { useCachedTableHealth, useScanTableHealth, useTableHealth } from '../hooks/useHealth';
 import {
   appTabFromPathTab,
   decodeSegment,
@@ -52,6 +52,7 @@ export function TableViewPage() {
   const { data: tableMetadata } = useTableMetadata(catalog, namespace, table);
   const { data: snapshotGraph } = useSnapshotGraph(catalog, namespace, table);
   const { data: cachedTableHealth, refetch: refetchCachedHealth } = useCachedTableHealth(catalog, namespace, table);
+  const { data: tableHealth } = useTableHealth(catalog, namespace, table, Boolean(cachedTableHealth));
   const scanTableHealth = useScanTableHealth();
   const [isScanningHealth, setIsScanningHealth] = useState(false);
   const hasHealthData = Boolean(cachedTableHealth);
@@ -64,7 +65,7 @@ export function TableViewPage() {
 
   useEffect(() => {
     if (activeTab === 'optimization' && !hasHealthData) {
-      navigate(tabPathFromAppTab(catalog, namespace, table, 'snapshots'), { replace: true });
+      navigate(tabPathFromAppTab(catalog, namespace, table, 'analytics'), { replace: true });
     }
   }, [activeTab, hasHealthData, catalog, namespace, table, navigate]);
 
@@ -119,11 +120,11 @@ export function TableViewPage() {
   };
 
   const tabs: { id: AppViewTab; label: string; icon: ReactNode }[] = [
+    { id: 'analytics', label: 'Storage', icon: <FileText className="w-4 h-4" /> },
     { id: 'snapshots', label: 'Snapshots', icon: <GitBranch className="w-4 h-4" /> },
     { id: 'manifests', label: 'Manifests', icon: <Layers className="w-4 h-4" /> },
     { id: 'files', label: 'Files', icon: <File className="w-4 h-4" /> },
     { id: 'statistics', label: 'Statistics', icon: <BarChart3 className="w-4 h-4" /> },
-    { id: 'analytics', label: 'Storage', icon: <FileText className="w-4 h-4" /> },
     { id: 'timeline', label: 'Timeline', icon: <Clock className="w-4 h-4" /> },
     ...(hasHealthData
       ? [{ id: 'optimization' as const, label: 'Optimize', icon: <Wrench className="w-4 h-4" /> }]
@@ -145,9 +146,9 @@ export function TableViewPage() {
             <p className="text-sm text-gray-500">
               {catalog} | Format v{tableMetadata?.format_version || '?'} |{' '}
               {tableMetadata?.snapshot_count || 0} snapshots
-              {cachedTableHealth && (
+              {tableHealth && (
                 <span className="ml-2">
-                  | Health {cachedTableHealth.health_score}/100 ({cachedTableHealth.status})
+                  | Health {tableHealth.health_score}/100 ({tableHealth.status})
                 </span>
               )}
             </p>
@@ -169,17 +170,59 @@ export function TableViewPage() {
           </div>
         </div>
 
+        {tableHealth && (
+          <div className="mt-3 flex flex-wrap gap-2 text-xs">
+            {tableHealth.metrics.total_records > 0 && (
+              <span className="px-2 py-1 rounded bg-blue-50 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300 border border-blue-150 dark:border-blue-800">
+                <span className="font-semibold">{tableHealth.metrics.total_records.toLocaleString()}</span> rows
+              </span>
+            )}
+
+            {(tableHealth.metrics.total_position_deletes > 0 || tableHealth.metrics.total_equality_deletes > 0) && (
+              <span className="px-2 py-1 rounded bg-red-50 dark:bg-red-900/30 text-red-700 dark:text-red-300 border border-red-150 dark:border-red-800 flex items-center gap-1">
+                Delete records:{' '}
+                {tableHealth.metrics.total_position_deletes > 0 && (
+                  <span className="font-semibold">{tableHealth.metrics.total_position_deletes.toLocaleString()} pos</span>
+                )}
+                {tableHealth.metrics.total_equality_deletes > 0 && (
+                  <span>
+                    {tableHealth.metrics.total_position_deletes > 0 ? ', ' : ''}
+                    <span className="font-semibold">{tableHealth.metrics.total_equality_deletes.toLocaleString()} eq</span>
+                  </span>
+                )}
+              </span>
+            )}
+
+            {tableHealth.metrics.schema_evolution_count > 1 && (
+              <span className="px-2 py-1 rounded bg-purple-50 dark:bg-purple-900/30 text-purple-700 dark:text-purple-300 border border-purple-150 dark:border-purple-800" title="Schema has evolved over time">
+                Schema: <span className="font-semibold">{tableHealth.metrics.schema_evolution_count} versions</span>
+              </span>
+            )}
+
+            {tableHealth.metrics.partition_spec_evolution_count > 1 && (
+              <span className="px-2 py-1 rounded bg-yellow-50 dark:bg-yellow-900/30 text-yellow-700 dark:text-yellow-300 border border-yellow-250 dark:border-yellow-800" title="Partition spec has evolved, which can affect query performance">
+                Partition specs: <span className="font-semibold">{tableHealth.metrics.partition_spec_evolution_count} versions</span>
+              </span>
+            )}
+
+            {tableHealth.metrics.metadata_log_depth > 15 && (
+              <span className="px-2 py-1 rounded bg-orange-50 dark:bg-orange-900/30 text-orange-700 dark:text-orange-300 border border-orange-150 dark:border-orange-850" title="Metadata log depth is high. Suggests snapshot expiration or metadata cleanup is needed.">
+                Metadata log: <span className="font-semibold">{tableHealth.metrics.metadata_log_depth} files</span>
+              </span>
+            )}
+          </div>
+        )}
+
         <div className="flex gap-1 mt-3 -mb-3">
           {tabs.map((tab) => (
             <button
               key={tab.id}
               type="button"
               onClick={() => handleTabChange(tab.id)}
-              className={`flex items-center gap-2 px-4 py-2 text-sm font-medium rounded-t-lg transition-colors ${
-                activeTab === tab.id
-                  ? 'bg-gray-100 dark:bg-gray-700 text-iceberg border-b-2 border-iceberg'
-                  : 'text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white hover:bg-gray-50 dark:hover:bg-gray-700'
-              }`}
+              className={`flex items-center gap-2 px-4 py-2 text-sm font-medium rounded-t-lg transition-colors ${activeTab === tab.id
+                ? 'bg-gray-100 dark:bg-gray-700 text-iceberg border-b-2 border-iceberg'
+                : 'text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white hover:bg-gray-50 dark:hover:bg-gray-700'
+                }`}
             >
               {tab.icon}
               {tab.label}

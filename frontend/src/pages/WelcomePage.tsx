@@ -9,7 +9,7 @@ export function WelcomePage() {
       <div className="text-center max-w-md">
         <Database className="w-20 h-20 mx-auto text-iceberg mb-6" />
         <h2 className="text-2xl font-bold text-gray-900 dark:text-white mb-3">
-          Welcome to Iceberg Visualizer
+          Welcome to Fern
         </h2>
         <p className="text-gray-500 dark:text-gray-400 mb-6">
           Connect to a catalog and select a table from the sidebar to explore

@@ -59,6 +59,16 @@ class TableHealthMetrics(BaseModel):
     last_snapshot_expiration: Optional[datetime] = None
     days_since_last_write: Optional[float] = None
 
+    # New Observability Metrics
+    total_records: int = Field(0, description="Estimated total records in current snapshot")
+    total_position_deletes: int = Field(0, description="Total positional delete records")
+    total_equality_deletes: int = Field(0, description="Total equality delete records")
+    metadata_log_depth: int = Field(0, description="Number of metadata.json history pointers")
+    schema_evolution_count: int = Field(0, description="Number of schema versions")
+    partition_spec_evolution_count: int = Field(0, description="Number of partition spec versions")
+    estimated_s3_cost_monthly: float = Field(0.0, description="Estimated monthly S3 storage cost in USD")
+
+
 
 class TableHealth(BaseModel):
     """Health assessment for a table."""
