@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import logging
 from concurrent.futures import ThreadPoolExecutor
 from enum import Enum
 from typing import Literal, Optional
@@ -19,9 +20,10 @@ from app.models.health import (
 )
 from app.services import catalog_service
 from app.services.health_service import HealthService
-from app.services.health_cache import health_cache, CachedTableHealth
+from app.services.health_cache import health_cache, CachedTableHealth, CacheMissingError, CacheExpiredError
 from app.services.job_service import job_service, JobStatus
 
+logger = logging.getLogger(__name__)
 router = APIRouter()
 _health_scan_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="health-scan")
 
@@ -284,7 +286,7 @@ async def get_health_summary(
         description="Scan mode: cached (instant), light (metadata only), full (with S3 manifest reads)"
     ),
     max_cache_age_minutes: int = Query(
-        60,
+        1440,
         ge=1,
         description="Maximum cache age in minutes (for cached mode)"
     ),
@@ -318,21 +320,42 @@ async def get_health_summary(
     """
     # Try to return cached data first
     if mode == ScanMode.CACHED:
-        cached = health_cache.get_cached_summary(catalog, max_age_minutes=max_cache_age_minutes)
-        if cached:
-            return cached
-        # Don't fall back to synchronous scan - return error indicating no cache
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail={
-                "error": "no_cache",
-                "message": f"No cached health data for catalog '{catalog}'. Use /health/summary/stream for streaming results or /health/scan/trigger to run a background scan.",
-                "alternatives": [
-                    {"endpoint": "/health/summary/stream", "description": "Stream results namespace-by-namespace"},
-                    {"endpoint": "/health/scan/trigger", "description": "Trigger background scan and cache results"},
-                ],
-            },
-        )
+        try:
+            cached = health_cache.get_cached_summary(catalog, max_age_minutes=max_cache_age_minutes)
+            if cached:
+                return cached
+        except CacheMissingError as e:
+            logger.warning("Cache missing for catalog '%s'", catalog)
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={
+                    "error": "no_cache",
+                    "message": f"No cached health data exists for catalog '{catalog}'. Use /health/summary/stream for streaming results or /health/scan/trigger to run a background scan.",
+                    "alternatives": [
+                        {"endpoint": "/health/summary/stream", "description": "Stream results namespace-by-namespace"},
+                        {"endpoint": "/health/scan/trigger", "description": "Trigger background scan and cache results"},
+                    ],
+                },
+            )
+        except CacheExpiredError as e:
+            logger.warning(
+                "Cache expired for catalog '%s'. Last scanned at %s (%d mins ago, max age is %d mins)",
+                catalog, e.scanned_at, e.age_minutes, e.max_age_minutes
+            )
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={
+                    "error": "cache_expired",
+                    "message": f"Cached health data for catalog '{catalog}' has expired. Last scanned at {e.scanned_at.isoformat()} ({e.age_minutes} minutes ago, max age is {e.max_age_minutes} minutes). Please trigger a fresh scan.",
+                    "scanned_at": e.scanned_at.isoformat(),
+                    "age_minutes": e.age_minutes,
+                    "max_age_minutes": e.max_age_minutes,
+                    "alternatives": [
+                        {"endpoint": "/health/scan/trigger", "description": "Trigger background scan to refresh cache"},
+                        {"endpoint": "/health/summary?mode=light", "description": "Run an on-demand light metadata scan"},
+                    ],
+                },
+            )
     
     pyiceberg_catalog = catalog_service.get_catalog(catalog)
     if not pyiceberg_catalog:

@@ -44,6 +44,23 @@ class CachedTableHealth:
     scanned_at: datetime
 
 
+class CacheExpiredError(Exception):
+    """Raised when cached summary is present but exceeds max age."""
+    def __init__(self, catalog: str, scanned_at: datetime, max_age_minutes: int):
+        self.catalog = catalog
+        self.scanned_at = scanned_at
+        self.max_age_minutes = max_age_minutes
+        self.age_minutes = int((datetime.utcnow() - scanned_at).total_seconds() / 60)
+        super().__init__(f"Cache expired for catalog '{catalog}'. Last scanned at {scanned_at} ({self.age_minutes} minutes ago, max age is {max_age_minutes} minutes).")
+
+
+class CacheMissingError(Exception):
+    """Raised when no cached summary is present in the cache."""
+    def __init__(self, catalog: str):
+        self.catalog = catalog
+        super().__init__(f"No cached health data exists for catalog '{catalog}'.")
+
+
 class HealthCache:
     """
     SQLite-based cache for health scan results.
@@ -242,7 +259,7 @@ class HealthCache:
     def get_cached_summary(
         self,
         catalog: str,
-        max_age_minutes: int = 60
+        max_age_minutes: int = 1440
     ) -> Optional[TableHealthSummary]:
         """
         Get cached catalog summary if fresh enough.
@@ -262,14 +279,16 @@ class HealthCache:
             row = conn.execute("""
                 SELECT * FROM catalog_summary
                 WHERE catalog = ?
-                AND datetime(scanned_at) > datetime('now', ?)
-            """, (catalog, f"-{max_age_minutes} minutes")).fetchone()
+            """, (catalog,)).fetchone()
             
             if not row:
-                return None
+                raise CacheMissingError(catalog)
             
             scanned_at = datetime.fromisoformat(row["scanned_at"])
             cache_age = (datetime.utcnow() - scanned_at).total_seconds() / 60
+            
+            if cache_age > max_age_minutes:
+                raise CacheExpiredError(catalog, scanned_at, max_age_minutes)
             
             return TableHealthSummary(
                 total_tables=row["total_tables"],
@@ -623,13 +642,17 @@ class HealthCache:
         with session_scope() as session:
             row = session.execute(
                 select(CatalogSummary).where(
-                    CatalogSummary.catalog == catalog,
-                    CatalogSummary.scanned_at > datetime.utcnow() - timedelta(minutes=max_age_minutes),
+                    CatalogSummary.catalog == catalog
                 )
             ).scalar_one_or_none()
+            
         if not row:
-            return None
+            raise CacheMissingError(catalog)
+            
         cache_age = (datetime.utcnow() - row.scanned_at).total_seconds() / 60
+        if cache_age > max_age_minutes:
+            raise CacheExpiredError(catalog, row.scanned_at, max_age_minutes)
+            
         return TableHealthSummary(
             total_tables=row.total_tables,
             healthy_tables=row.healthy_tables,
